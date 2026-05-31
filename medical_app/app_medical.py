@@ -51,7 +51,7 @@ MODELS = [
     "qwen2.5:7b-instruct-q4_K_M",
     "mistral:7b-instruct-v0.3-q5_0",
     "gemma2:9b-instruct-q4_K_M",
-    "koesn/mistral-7b-instruct:Q4_0",
+    "deepseek-r1:7b",
 ]
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
@@ -60,7 +60,7 @@ MODEL_LABELS = {
     "qwen2.5:7b-instruct-q4_K_M": "Qwen2.5",
     "mistral:7b-instruct-v0.3-q5_0": "Mistral",
     "gemma2:9b-instruct-q4_K_M": "Gemma2",
-    "koesn/mistral-7b-instruct:Q4_0": "Koesn/Mistral",
+    "deepseek-r1:7b": "DeepSeek-R1",
 }
 
 MEDICAL_OBJECTS = get_medical_objects()

@@ -29,6 +29,10 @@ Thumbs.db
 # Node
 node_modules/
 
+# BERT model cache
+.bert_cache/
+**/.bert_cache/
+
 # Local models / large model files
 models/
 *.gguf
