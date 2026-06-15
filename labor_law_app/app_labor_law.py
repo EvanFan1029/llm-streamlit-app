@@ -471,8 +471,44 @@ def run_model_pipeline(case_text: str, selected_models: List[str]) -> None:
     reset_labor_state()
     st.session_state["labor_case_text"] = case_text
 
+    # ── Step 0: BERT 案件方向分析 ──
+    profile_hint = ""
     if _BERT_AVAILABLE:
-        prompt = build_labor_prompt_v2(case_text)
+        with st.spinner("🧠 BERT 正在分析案件关键讨论方向..."):
+            bert = BERTProcessor.get_instance()
+            if not bert.is_loaded:
+                bert._ensure_loaded()
+            input_proc = BERTInputProcessor(bert)
+            profile = input_proc.analyze_case(case_text)
+            st.session_state["labor_bert_profile"] = profile.to_dict()
+            profile_hint = build_profile_hint(profile)
+
+            # Show BERT's extracted directions inline
+            st.markdown("#### 🧠 BERT 案件关键方向分析")
+            cols = st.columns(5)
+            axes = [
+                ("劳动关系信号", profile.employment_relation_score),
+                ("证据充分性", profile.evidence_completeness),
+                ("雇主违法程度", profile.employer_conduct_severity),
+                ("法定违规可能", profile.statutory_violation_score),
+                ("诉求强度", profile.claim_strength_signal),
+            ]
+            for i, (label, val) in enumerate(axes):
+                with cols[i]:
+                    st.metric(label, f"{val:.2f}")
+                    st.progress(min(max(val, 0.0), 1.0))
+
+            if profile_hint:
+                st.markdown(f"""
+                <div class="soft-card" style="margin-top:0.5rem;">
+                    <strong>🔑 BERT 提取的关键讨论方向：</strong><br>
+                    <span style="color:#334155;">{html.escape(profile_hint)}</span>
+                </div>
+                """, unsafe_allow_html=True)
+            st.markdown("---")
+
+    if _BERT_AVAILABLE:
+        prompt = build_labor_prompt_v2(case_text, profile_hint)
     else:
         from labor_law_app.bert_prompts import build_labor_prompt
         prompt = build_labor_prompt(case_text)
