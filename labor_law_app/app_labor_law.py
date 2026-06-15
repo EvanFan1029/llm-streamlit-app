@@ -673,6 +673,9 @@ def render_structured_comparison(results: dict[str, Any]) -> None:
     model_cols = [model_ui_name(m) for m in present_models]
 
     rows: list[dict[str, Any]] = []
+    disagree_count = 0
+    agree_count = 0
+
     for item in LABOR_OBJECTS:
         oid = item["object_id"]
         values: dict[str, str] = {}
@@ -680,9 +683,14 @@ def render_structured_comparison(results: dict[str, Any]) -> None:
             structured = (results.get(model_name, {}) or {}).get("structured_analysis", {}) or {}
             values[model_name] = _format_structured_cell(structured.get(oid))
 
-        # Detect disagreement: are there at least 2 distinct non-empty values?
+        # Detect disagreement
         non_empty = [v for v in values.values() if v and v != "未返回"]
         has_disagreement = len(set(non_empty)) >= 2
+
+        if has_disagreement:
+            disagree_count += 1
+        elif len(non_empty) >= 1:
+            agree_count += 1
 
         row = {"维度": item["label"]}
         for model_name in present_models:
@@ -693,7 +701,13 @@ def render_structured_comparison(results: dict[str, Any]) -> None:
                 row[model_ui_name(model_name)] = html.escape(val)
         rows.append(row)
 
-    # Render with HTML-safe cells
+    # Summary line
+    if disagree_count == 0:
+        st.info(f"全部 {agree_count} 个有效维度上模型判断一致，未检测到分歧。")
+    else:
+        st.warning(f"⚠️ {disagree_count} 个维度存在分歧（<b>加粗</b>标注），{agree_count} 个维度一致。")
+
+    # Render table
     header_html = "".join(f"<th>{html.escape(str(col))}</th>" for col in (["维度"] + model_cols))
     body_rows: list[str] = []
     for row in rows:
@@ -706,7 +720,6 @@ def render_structured_comparison(results: dict[str, Any]) -> None:
             <tbody>{''.join(body_rows)}</tbody>
         </table>
     </div>
-    <div class="small-caption" style="margin-top: 0.3rem;"><b>加粗</b> = 模型之间判断不一致</div>
     """, unsafe_allow_html=True)
 
 
