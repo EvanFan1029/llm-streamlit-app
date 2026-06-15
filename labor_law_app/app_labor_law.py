@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -23,13 +24,38 @@ from labor_law_app.normalize_labor import (
     build_labor_fact_table,
     get_labor_objects,
     normalize_all_models_labor_outputs,
+    extract_case_fact_patch,
 )
 from labor_law_app.labor_truthfinder import (
     explain_truth_per_labor_object,
     labor_truthfinder_run,
     rank_models_by_trust,
 )
-from labor_law_app.api import analyze_labor_case
+
+# ── BERT 模块 ──
+_BERT_AVAILABLE = False
+try:
+    from labor_law_app.bert_processor import BERTProcessor
+    from labor_law_app.bert_input_processor import BERTInputProcessor, CaseSemanticProfile
+    from labor_law_app.bert_output_processor import BERTOutputProcessor
+    from labor_law_app.bert_prompts import build_labor_prompt_v2, build_profile_hint
+    from labor_law_app.bert_report_generator import BERTReportGenerator
+    _BERT_AVAILABLE = True
+except ImportError:
+    pass
+
+# ── ZK 模块 ──
+_ZK_AVAILABLE = False
+try:
+    from labor_law_app.zk.zk_labor_builder import (
+        collect_labor_zk_state,
+        build_labor_circom_input,
+        run_labor_zk_verification,
+        run_full_labor_zk_pipeline,
+    )
+    _ZK_AVAILABLE = True
+except ImportError:
+    pass
 
 st.set_page_config(
     page_title="劳动法 TruthFinder 可信聚合系统",
@@ -63,21 +89,33 @@ SESSION_DEFAULTS = {
     "labor_times": None,
     "labor_normalized_all": None,
     "labor_truthfinder_payload": None,
+    "labor_final_report": "",
+    "labor_bert_profile": None,
     "labor_model_running": "",
     "labor_error": "",
-    "labor_bert_analysis": None,
+    # ZK
+    "zk_pipeline_result": None,
+    "zk_verification_ran": False,
+    "zk_stage_status": "未启动",
+    "zk_error": "",
+    "zk_model_ids": [],
 }
 
 
-def init_session():
-    for key, default in SESSION_DEFAULTS.items():
-        if key not in st.session_state:
-            st.session_state[key] = default
+# ══════════════════════════════════════════════════════════════════
+#  CSS + 基础渲染
+# ══════════════════════════════════════════════════════════════════
 
-
-def inject_css():
+def inject_css() -> None:
     st.markdown("""
     <style>
+    .stApp {
+        background:
+            radial-gradient(circle at top right, rgba(14, 165, 233, 0.08), transparent 26%),
+            linear-gradient(180deg, #F8FCFF 0%, #FFFFFF 18%, #FFFFFF 100%);
+        color: #0F172A;
+        font-family: "Avenir Next", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
     .block-container { max-width: 1180px; padding-top: 1.1rem; padding-bottom: 3rem; }
     .hero-card {
         background: linear-gradient(135deg, #FFFFFF 0%, #F4FBFF 100%);
@@ -102,6 +140,8 @@ def inject_css():
         border: 1px solid rgba(245, 158, 11, 0.32); border-radius: 18px;
         padding: 1rem 1.15rem; margin-bottom: 1rem;
     }
+    .disclaimer-card h4 { margin: 0 0 0.45rem 0; color: #92400E; }
+    .disclaimer-card p { margin: 0; color: #7C2D12; line-height: 1.55; }
     .step-title { color: #0284C7; font-size: 0.86rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
     .small-caption { color: #64748B; font-size: 0.82rem; }
     .muted-text { color: #475569; line-height: 1.55; }
@@ -110,43 +150,48 @@ def inject_css():
         padding: 0.34rem 0.75rem; border-radius: 999px; font-size: 0.84rem;
         font-weight: 650; border: 1px solid #E2E8F0;
     }
+    .status-badge.is-info { background: rgba(14, 165, 233, 0.08); color: #0369A1; border-color: rgba(14, 165, 233, 0.18); }
     .status-badge.is-success { background: rgba(34, 197, 94, 0.12); color: #15803D; border-color: rgba(34, 197, 94, 0.35); }
     .status-badge.is-warning { background: rgba(245, 158, 11, 0.12); color: #B45309; border-color: rgba(245, 158, 11, 0.35); }
     .status-badge.is-error { background: rgba(239, 68, 68, 0.12); color: #B91C1C; border-color: rgba(239, 68, 68, 0.35); }
-    .status-badge.is-info { background: rgba(14, 165, 233, 0.08); color: #0369A1; border-color: rgba(14, 165, 233, 0.18); }
     .status-badge.is-pending { background: rgba(148, 163, 184, 0.10); color: #64748B; border-color: rgba(148, 163, 184, 0.26); }
     .light-table-wrap {
         background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 12px;
         overflow: hidden; box-shadow: 0 8px 20px rgba(15, 23, 42, 0.02);
     }
-    .light-table { width: 100%; border-collapse: collapse; background: #FFFFFF; }
+    .light-table { width: 100%; border-collapse: collapse; background: #FFFFFF; color: #0F172A; }
     .light-table thead tr { background: #EFF8FF; }
     .light-table th, .light-table td {
         padding: 0.78rem 0.9rem; border-bottom: 1px solid #E2E8F0;
         text-align: left; vertical-align: top; font-size: 0.94rem;
+        color: #0F172A; word-break: break-word; white-space: pre-wrap;
     }
     .light-table tbody tr:hover { background: #F8FAFC; }
     .light-table tbody tr:last-child td { border-bottom: none; }
-    .model-card-title { font-weight: 700; margin-bottom: 0.25rem; }
+    .model-card-title { font-weight: 700; color: #0F172A; margin-bottom: 0.25rem; }
     .code-preview {
         background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 12px;
         padding: 0.85rem 0.95rem; font-family: "IBM Plex Mono", "Consolas", monospace;
-        font-size: 0.84rem; white-space: pre-wrap; word-break: break-word;
+        font-size: 0.84rem; color: #0F172A; white-space: pre-wrap; word-break: break-word;
     }
     </style>
     """, unsafe_allow_html=True)
 
 
-def render_header():
+def model_ui_name(model_name: str) -> str:
+    return MODEL_LABELS.get(model_name, model_name)
+
+
+def render_header() -> None:
     st.markdown("""
     <div class="hero-card">
         <h1>⚖️ 劳动法场景多模型 TruthFinder 可信聚合系统</h1>
-        <p>输入劳动争议案件描述 → 四模型结构化分析 → BERT 语义匹配 → TruthFinder 可信聚合 → 律师综合报告</p>
+        <p>输入劳动争议案件描述 → 四模型结构化分析 → BERT 语义对齐 → TruthFinder 可信聚合 → 律师综合报告</p>
     </div>
     """, unsafe_allow_html=True)
 
 
-def render_step_header(step_no: int, title: str, caption: str = ""):
+def render_step_header(step_no: int, title: str, caption: str = "") -> None:
     caption_html = f'<div class="small-caption" style="margin-top: 0.2rem;">{html.escape(caption)}</div>' if caption else ""
     st.markdown(f"""
     <div class="section-card">
@@ -157,7 +202,7 @@ def render_step_header(step_no: int, title: str, caption: str = ""):
     """, unsafe_allow_html=True)
 
 
-def render_light_table(rows: list[dict[str, Any]], columns: list[str]):
+def render_light_table(rows: list[dict[str, Any]], columns: list[str]) -> None:
     header_html = "".join(f"<th>{html.escape(str(col))}</th>" for col in columns)
     body_rows = []
     for row in rows:
@@ -167,463 +212,1113 @@ def render_light_table(rows: list[dict[str, Any]], columns: list[str]):
     <div class="light-table-wrap">
         <table class="light-table">
             <thead><tr>{header_html}</tr></thead>
-            <tbody>{"".join(body_rows)}</tbody>
+            <tbody>{''.join(body_rows)}</tbody>
         </table>
     </div>
     """, unsafe_allow_html=True)
 
 
-def model_ui_name(name: str) -> str:
-    return MODEL_LABELS.get(name, name)
-
-
-def call_ollama(model: str, prompt: str, timeout: int = 180) -> str:
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "stream": False,
-        "options": {"temperature": 0.1, "num_ctx": 4096, "num_predict": 1024},
-    }
-    try:
-        resp = requests.post(OLLAMA_URL, json=payload, timeout=timeout)
-        resp.raise_for_status()
-        data = resp.json()
-        return data.get("message", {}).get("content", "")
-    except Exception as e:
-        return f"[ERROR] {model}: {e}"
-
-
-def run_all_models(prompt: str, selected_models: List[str]) -> tuple[Dict[str, str], Dict[str, float]]:
-    results: Dict[str, str] = {}
-    times: Dict[str, float] = {}
-
-    for i, model in enumerate(selected_models):
-        t0 = time.time()
-        label = model_ui_name(model)
-        st.info(f"🔄 正在调用 {label} ({i+1}/{len(selected_models)})...")
-        results[model] = call_ollama(model, prompt)
-        times[model] = time.time() - t0
-        if results[model].startswith("[ERROR]"):
-            st.warning(f"❌ {label}: {results[model]}")
-        else:
-            st.success(f"✅ {label} ({times[model]:.0f}s)")
-
-        # Unload model immediately after use
-        try:
-            requests.post(
-                "http://localhost:11434/api/generate",
-                json={"model": model, "keep_alive": 0},
-                timeout=3,
-            )
-        except Exception:
-            pass
-
-    return results, times
-
-
-def parse_model_results(raw_results: Dict[str, str]) -> Dict[str, Any]:
-    parsed: Dict[str, Any] = {}
-    for model, raw in raw_results.items():
-        if raw.startswith("[ERROR]"):
-            parsed[model] = {"case_summary": raw, "structured_analysis": {}}
-            continue
-        c = raw.strip()
-        if c.startswith("```"):
-            lines = c.split("\n")
-            c = "\n".join(lines[1:-1]) if len(lines) > 2 else c
-        try:
-            parsed[model] = json.loads(c)
-        except Exception:
-            parsed[model] = {"case_summary": c[:500], "structured_analysis": {}}
-    return parsed
-
-
-def run_analysis(case_text: str, use_bert: bool, manual_outputs: Optional[str] = None,
-                  selected_models: Optional[List[str]] = None):
-    st.session_state.labor_error = ""
-    st.session_state.labor_results = None
-    st.session_state.labor_bert_analysis = None
-
-    try:
-        if manual_outputs:
-            try:
-                model_outputs = json.loads(manual_outputs)
-            except Exception:
-                st.session_state.labor_error = "手动输入的模型输出格式不正确，请检查 JSON 格式"
-                return
-            results = {}
-            times = {}
-            for model, raw in model_outputs.items():
-                results[model] = json.dumps(raw, ensure_ascii=False) if not isinstance(raw, str) else raw
-                times[model] = 0.0
-        elif selected_models:
-            from labor_law_app.bert_prompts import build_labor_prompt as blp
-            prompt = blp(case_text)
-            results, times = run_all_models(prompt, selected_models)
-        else:
-            results = {}
-            times = {}
-
-        st.session_state.labor_results = results
-        st.session_state.labor_times = times
-        parsed = parse_model_results(results)
-
-        api_result = analyze_labor_case({
-            "case_text": case_text,
-            "model_outputs": parsed,
-            "use_bert": use_bert,
-        })
-
-        st.session_state.labor_normalized_all = api_result.get("normalized_by_source", {})
-        st.session_state.labor_truthfinder_payload = api_result.get("truthfinder", {})
-        st.session_state.labor_bert_analysis = api_result.get("_bert_analysis", {})
-    except Exception as e:
-        st.session_state.labor_error = f"分析过程出错: {e}"
-        import traceback
-        st.session_state.labor_error += "\n" + traceback.format_exc()
-
-
-def render_step1_input():
-    render_step_header(1, "案件信息输入", "输入劳动争议案件描述")
-    case_text = st.text_area(
-        "案件描述",
-        value=st.session_state.labor_case_text,
-        height=150,
-        placeholder="例：劳动者2023年3月入职一家科技公司，一直未签书面劳动合同，2024年4月被口头辞退，主张双倍工资和违法解除赔偿金。月薪8000元，有银行工资流水但没有劳动合同。",
-        key="case_text_input",
-    )
-    st.session_state.labor_case_text = case_text
-
-    use_bert = st.checkbox("启用 BERT 语义分析", value=False,
-                           help="首次加载模型约 30 秒。生成案件语义画像 + 分歧度/置信度报告。")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        use_ollama = st.checkbox("调用本地 Ollama 模型", value=False,
-                                 help="CPU 推理较慢，每模型约 2-5 分钟。不勾选则使用规则基线，秒出结果。")
-    selected_models: List[str] = []
-    if use_ollama:
-        with col2:
-            model_options = st.multiselect(
-                "选择要调用的模型（建议 1 个）",
-                options=MODELS,
-                default=MODELS[:1],
-                format_func=model_ui_name,
-            )
-            selected_models = list(model_options)
-
-    manual_raw = None
-    manual_mode = st.checkbox("手动输入模型输出（JSON）", value=False,
-                              help="粘贴已准备好的模型 JSON 输出，完全跳过 LLM 调用。")
-    if manual_mode:
-        manual_raw = st.text_area(
-            "模型输出 JSON",
-            height=200,
-            placeholder='{"qwen2.5:7b": {"case_summary": "...", "structured_analysis": {...}}}',
-        )
-
-    if st.button("❙❙ 开始分析", type="primary", use_container_width=True):
-        if not case_text.strip():
-            st.error("请输入案件描述")
-            return
-        if manual_mode and manual_raw:
-            run_analysis(case_text, use_bert, manual_raw)
-        elif use_ollama and selected_models:
-            run_analysis(case_text, use_bert, None, selected_models)
-        else:
-            run_analysis(case_text, use_bert, None)
-
-
-def render_step2_bert():
-    render_step_header(2, "BERT 案件语义画像", "BERT 从案件文本中提取的语义特征")
-    bert_data = st.session_state.labor_bert_analysis or {}
-    if not bert_data.get("bert_available"):
-        st.info("BERT 未启用。勾选「启用 BERT 语义分析」可使用 BERT 增强语义匹配和报告生成。")
-        return
-
-    profile = bert_data.get("semantic_case_profile") or {}
-    if not profile:
-        st.info("BERT 已加载，正在分析...")
-        return
-
-    cols = st.columns(5)
-    axes = [
-        ("劳动关系信号", "employment_relation_score"),
-        ("证据充分性", "evidence_completeness"),
-        ("雇主违法程度", "employer_conduct_severity"),
-        ("法定违规可能", "statutory_violation_score"),
-        ("诉求强度", "claim_strength_signal"),
-    ]
-    for i, (label, key) in enumerate(axes):
-        val = profile.get(key, 0.5)
-        with cols[i]:
-            st.metric(label, f"{val:.2f}")
-            st.progress(min(max(val, 0.0), 1.0))
-
-
-def render_step3_outputs():
-    render_step_header(3, "四模型原始输出", "四个本地大模型的结构化分析结果")
-    results = st.session_state.labor_results
-    times = st.session_state.labor_times
-    if results is None:
-        st.info("暂无模型输出（分析过程可能出错，请查看错误信息）")
-        if st.session_state.labor_error:
-            st.error(st.session_state.labor_error)
-        return
-    if not results:
-        st.info("当前使用规则基线模式（未调用 LLM），跳过模型输出展示。勾选「调用本地 Ollama 模型」可启用 LLM 推理。")
-        return
-
-    cols = st.columns(4)
-    for i, model in enumerate(MODELS):
-        raw = results.get(model, "")
-        elapsed = (times or {}).get(model, 0)
-        with cols[i]:
-            st.markdown(f'<div class="model-card-title">{html.escape(model_ui_name(model))}</div>', unsafe_allow_html=True)
-            st.caption(f"`{model}` · {elapsed:.1f}s" if elapsed else f"`{model}`")
-            if raw.startswith("[ERROR]"):
-                st.error(raw[:200])
-            elif raw:
-                with st.expander("查看原始输出", expanded=False):
-                    st.code(raw[:3000], language="json")
-            else:
-                st.caption("未调用")
-
-
-def render_step4_comparison():
-    render_step_header(4, "结构化分析对比", "7 个维度 × 4 个模型的结构化判断对比")
-    normalized = st.session_state.labor_normalized_all
-    if not normalized:
-        st.info("暂无规范化数据")
-        return
-
-    rows = []
-    for obj in LABOR_OBJECTS:
-        oid = obj["object_id"]
-        row = {"维度": obj["label"]}
-        for model in MODELS:
-            facts = (normalized.get(model, {}) or {}).get("normalized", {}).get(oid, [])
-            row[model_ui_name(model)] = "、".join(facts) if facts else "—"
-        rows.append(row)
-
-    cols = ["维度"] + [model_ui_name(m) for m in MODELS]
-    render_light_table(rows, cols)
-
-
-def render_step5_truthfinder():
-    render_step_header(5, "TruthFinder 可信聚合结果", "模型可信度排名 + 每维度事实排行")
-    payload = st.session_state.labor_truthfinder_payload
-    if not payload:
-        st.info("暂无聚合结果")
-        return
-
-    trust_rank = payload.get("model_trust_rank", [])
-    if len(trust_rank) <= 1:
-        st.warning("⚠️ 当前仅使用 1 个模型。TruthFinder 的真值发现算法需要 2 个以上模型才能发挥多源聚合优势。分歧度和置信度在单模型下无参考意义。建议勾选至少 2 个模型后重新分析。")
-    if trust_rank:
-        st.markdown("#### 模型可信度排名")
-        trust_rows = [
-            {"排名": i + 1, "模型": model_ui_name(r["model"]), "信任度": f"{r['trust']:.4f}"}
-            for i, r in enumerate(trust_rank)
-        ]
-        render_light_table(trust_rows, ["排名", "模型", "信任度"])
-
-    st.markdown("#### 各维度事实排行")
-    bert_data = st.session_state.labor_bert_analysis or {}
-    report = (bert_data.get("comprehensive_report") or {}) if bert_data.get("bert_available") else {}
-
-    for obj in LABOR_OBJECTS:
-        oid = obj["object_id"]
-        obj_results = payload.get("object_results", [])
-        obj_row = next((r for r in obj_results if r.get("object_id") == oid), None)
-        if not obj_row:
-            continue
-
-        candidates = obj_row.get("candidates", [])[:5]
-        obj_reports = report.get("object_reports", []) if report else []
-        obj_rpt = next((r for r in obj_reports if r.get("object_id") == oid), {}) if obj_reports else {}
-        div_info = (obj_rpt.get("divergence") or {}) if obj_rpt else {}
-        conf_info = (obj_rpt.get("confidence") or {}) if obj_rpt else {}
-
-        mode_tag = "单选" if OBJECT_MODES.get(oid) == "single" else "多选"
-        div_level = div_info.get("level", "—")
-        conf_level = conf_info.get("level", "—")
-        div_cls = "is-success" if div_level == "低分歧" else ("is-warning" if div_level == "中分歧" else "is-error")
-
-        with st.expander(
-            f"{obj['label']} [{mode_tag}] —— "
-            f"分歧度: {div_level} | 置信度: {conf_level}",
-            expanded=(oid == "adjudication_tendency"),
-        ):
-            if not candidates:
-                st.caption("无候选事实")
-                continue
-            fact_rows = []
-            for c in candidates:
-                selected = "✅" if c.get("is_selected") else ""
-                support_by = c.get("support_by_model", {}) or {}
-                model_names = [model_ui_name(m) for m, w in support_by.items() if float(w) > 0]
-                support_str = ", ".join(model_names) if model_names else "—"
-                fact_rows.append({
-                    "排名": c.get("rank", "—"),
-                    "选中": selected,
-                    "事实": c.get("fact", "—"),
-                    "置信度": f"{c.get('confidence', 0):.4f}",
-                    "支持模型": support_str,
-                })
-            render_light_table(fact_rows, ["排名", "选中", "事实", "置信度", "支持模型"])
-
-
-def render_step6_report():
-    render_step_header(6, "综合律师分析报告", "自然语言综合报告")
-    payload = st.session_state.labor_truthfinder_payload
-    bert_data = st.session_state.labor_bert_analysis or {}
-
-    if not payload:
-        st.info("暂无 TruthFinder 聚合结果")
-        return
-
-    # ── Build natural language report from TruthFinder results ──
-    trust_rank = payload.get("model_trust_rank", [])
-    object_results = payload.get("object_results", [])
-    n_models = len(trust_rank)
-
-    lines = []
-    lines.append("## 案件综合分析报告")
-    lines.append("")
-
-    # 1. Relationship assessment
-    rel_row = next((r for r in object_results if r.get("object_id") == "relationship_type"), None)
-    adj_row = next((r for r in object_results if r.get("object_id") == "adjudication_tendency"), None)
-    if rel_row:
-        rel_fact = (rel_row.get("candidates", []) or [{}])[0].get("fact", "未确定")
-        lines.append(f"**法律关系认定**：{rel_fact}")
-    if adj_row:
-        adj_fact = (adj_row.get("candidates", []) or [{}])[0].get("fact", "未确定")
-        lines.append(f"**裁判倾向预判**：{adj_fact}")
-
-    # 2. Dispute focus
-    disp_row = next((r for r in object_results if r.get("object_id") == "dispute_focus"), None)
-    if disp_row:
-        selected = [c.get("fact") for c in (disp_row.get("candidates", []) or []) if c.get("is_selected")]
-        if selected:
-            lines.append(f"**核心争议类型**：{'、'.join(selected)}")
-
-    # 3. Key facts
-    fact_row = next((r for r in object_results if r.get("object_id") == "key_fact"), None)
-    if fact_row:
-        selected = [c.get("fact") for c in (fact_row.get("candidates", []) or []) if c.get("is_selected")]
-        real_facts = [f for f in selected if "证据不足" not in f]
-        if real_facts:
-            lines.append(f"**已识别关键事实**：{'、'.join(real_facts)}")
-
-    # 4. Legal articles
-    art_row = next((r for r in object_results if r.get("object_id") == "article_reference"), None)
-    if art_row:
-        selected = [c.get("fact") for c in (art_row.get("candidates", []) or []) if c.get("is_selected")]
-        if selected:
-            lines.append(f"**重点法条方向**：{'、'.join(selected[:8])}")
-
-    # 5. Background
-    bg_row = next((r for r in object_results if r.get("object_id") == "background"), None)
-    if bg_row:
-        bg_facts = [c.get("fact") for c in (bg_row.get("candidates", []) or []) if c.get("is_selected")]
-        non_default = [b for b in bg_facts if "无特殊" not in b]
-        if non_default:
-            lines.append(f"**特殊背景**：{'、'.join(non_default)}")
-
-    lines.append("")
-
-    # 6. Model trust
-    if n_models > 1:
-        lines.append(f"**模型可信度排行**（共 {n_models} 个模型）:")
-        for r in trust_rank:
-            lines.append(f"- {model_ui_name(r['model'])}：信任度 {r['trust']:.4f}")
-    elif n_models == 1:
-        lines.append(f"**注意**：当前只使用了 1 个模型（{model_ui_name(trust_rank[0]['model'])}），无法进行多模型对比。建议至少使用 2 个模型才能发挥 TruthFinder 的多源聚合优势。分歧度和置信度在单模型下无参考意义。")
-
-    lines.append("")
-
-    # 7. Evidence gaps + actions
-    gaps = []
-    for row in object_results:
-        for c in (row.get("candidates", []) or []):
-            if c.get("is_selected") and "证据不足" in str(c.get("fact", "")):
-                gaps.append(f"{row.get('object_label', '')}: {c.get('fact', '')}")
-
-    if gaps:
-        lines.append("**证据缺口及补充建议**：")
-        for g in gaps:
-            lines.append(f"- ⚠️ {g}")
-        lines.append("- 建议补充：书面劳动合同、工资银行流水、考勤记录、解除通知原件、社保缴纳记录")
-        lines.append("- 如需仲裁或诉讼，请注意劳动争议调解仲裁法第 27 条关于仲裁时效的规定（一般为一年）")
-
-    lines.append("")
-    lines.append("---")
-    lines.append("**免责声明**：本报告由多模型 TruthFinder 可信聚合系统自动生成，不构成正式法律意见。法律判断请以执业律师结合全部案件材料后的专业意见为准。")
-
-    report_text = "\n".join(lines)
-    st.markdown(report_text)
-
-    # If BERT report is available, show it as additional detail
-    report = bert_data.get("comprehensive_report") if bert_data.get("bert_available") else None
-    if report:
-        with st.expander("BERT 增强分析（技术细节）", expanded=False):
-            st.json(report.get("object_reports", [])[:3])
-
-
-def render_step7_zk():
-    render_step_header(7, "ZK 证明预览（技术预览）", "Groth16 零知识证明电路状态")
-    with st.expander("ZK 电路信息", expanded=False):
-        st.markdown("""
-        | 项目 | 状态 |
-        |------|------|
-        | Circom 电路 | 已就绪 (`truthfinder.circom`) |
-        | 证明对象 | TruthFinder 15 轮 Q16 定点迭代 |
-        | 输入格式 | M=4 models × K≤10 objects × N≤8 facts |
-        | BERT 影响 | 无——BERT 处理在电路边界外 |
-        | 确定性 | ✅ (BERT `model.eval()` + `no_grad()`) |
-        """)
-        st.caption("注：ZK 证明层当前仅支持翻译场景。劳动法场景的 ZK 适配为未来工作计划。")
-
-
-def main():
-    init_session()
-    inject_css()
-    render_header()
-
-    render_step1_input()
-
-    if st.session_state.labor_error:
-        st.error(st.session_state.labor_error)
-
-    if st.session_state.labor_results:
-        st.divider()
-        render_step2_bert()
-
-        st.divider()
-        render_step3_outputs()
-
-        st.divider()
-        render_step4_comparison()
-
-        st.divider()
-        render_step5_truthfinder()
-
-        st.divider()
-        render_step6_report()
-
-        st.divider()
-        render_step7_zk()
-
-    st.divider()
+def render_labor_disclaimer() -> None:
     st.markdown("""
     <div class="disclaimer-card">
         <h4>⚖️ 法律免责声明</h4>
-        <p>本系统为律师办案辅助工具，通过多模型 TruthFinder 可信聚合算法提供参考分析。</p>
-        <p>不构成正式法律意见、裁判预测或对案件结果的保证。法律判断请以执业律师结合全部案件材料后的专业意见为准。引用法条请以官方公布的最新有效文本为准。</p>
+        <p>
+            本系统为律师办案辅助工具，通过多模型 TruthFinder 可信聚合算法提供参考分析。<br/>
+            不构成正式法律意见、裁判预测或对案件结果的保证。法律判断请以执业律师结合全部案件材料后的专业意见为准。<br/>
+            引用法条请以国家法律法规数据库公布的最新有效文本为准。
+        </p>
     </div>
     """, unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  状态徽章
+# ══════════════════════════════════════════════════════════════════
+
+def _badge_tone(status: str) -> str:
+    if status in {"已完成", "已归一化", "已聚合", "已生成", "可用"}:
+        return "is-success"
+    if status in {"调用异常", "失败", "未就绪"}:
+        return "is-error"
+    if status in {"运行中", "生成中"}:
+        return "is-warning"
+    if status in {"部分失败", "解析失败"}:
+        return "is-warning"
+    if status in {"待输入", "待运行", "未生成"}:
+        return "is-pending"
+    return "is-info"
+
+
+def _badge_html(label: str, status: str) -> str:
+    return f'<span class="status-badge {_badge_tone(status)}">{html.escape(label)}：{html.escape(status)}</span>'
+
+
+def render_flow_status() -> None:
+    text_status = "已完成" if (st.session_state.get("labor_case_text") or "").strip() else "待输入"
+    results = st.session_state.get("labor_results")
+    normalized_all = st.session_state.get("labor_normalized_all")
+    tf_payload = st.session_state.get("labor_truthfinder_payload")
+    bert_profile = st.session_state.get("labor_bert_profile")
+    zk_result = st.session_state.get("zk_pipeline_result")
+
+    if results:
+        has_error = any(
+            (isinstance(v, str) and v.startswith("[ERROR]"))
+            for v in (results or {}).values()
+        )
+        model_status = "部分失败" if has_error else "已完成"
+    else:
+        model_status = "待运行"
+
+    bert_status = "已生成" if bert_profile else "待运行"
+    norm_status = "已归一化" if normalized_all else "待运行"
+    tf_status = "已聚合" if tf_payload else "待运行"
+    zk_status = "已生成" if zk_result else "未生成"
+
+    st.markdown(f"""
+    <div class="section-card">
+        <div class="small-caption">流程状态</div>
+        <div style="margin-top: 0.45rem;">
+            {_badge_html("案件描述", text_status)}
+            {_badge_html("四模型调用", model_status)}
+            {_badge_html("BERT画像", bert_status)}
+            {_badge_html("归一化", norm_status)}
+            {_badge_html("TruthFinder", tf_status)}
+            {_badge_html("ZK证明", zk_status)}
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  Session
+# ══════════════════════════════════════════════════════════════════
+
+def init_session_state() -> None:
+    for key, value in SESSION_DEFAULTS.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+def reset_labor_state() -> None:
+    for key in [
+        "labor_results", "labor_times", "labor_normalized_all",
+        "labor_truthfinder_payload", "labor_final_report",
+        "labor_bert_profile", "labor_model_running", "labor_error",
+        "zk_pipeline_result", "zk_verification_ran",
+        "zk_stage_status", "zk_error", "zk_model_ids",
+    ]:
+        st.session_state[key] = SESSION_DEFAULTS[key]
+
+
+# ══════════════════════════════════════════════════════════════════
+#  JSON 解析
+# ══════════════════════════════════════════════════════════════════
+
+def try_parse_json(text: str) -> Any:
+    text = (text or "").strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    match = re.search(r"```json\s*(\{.*?\})\s*```", text, flags=re.DOTALL | re.IGNORECASE)
+    if match:
+        try:
+            return json.loads(match.group(1))
+        except Exception:
+            pass
+    left = text.find("{")
+    right = text.rfind("}")
+    if left != -1 and right != -1 and right > left:
+        try:
+            return json.loads(text[left:right + 1])
+        except Exception:
+            return None
+    return None
+
+
+def _json_dumps_pretty(data: Any) -> str:
+    return json.dumps(_json_safe(data), ensure_ascii=False, indent=2)
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {_stringify_key(key): _json_safe(val) for key, val in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_safe(item) for item in value]
+    return value
+
+
+def _stringify_key(value: Any) -> str:
+    if isinstance(value, tuple):
+        return " :: ".join(_stringify_key(item) for item in value)
+    if isinstance(value, list):
+        return " / ".join(_stringify_key(item) for item in value)
+    return str(value)
+
+
+def _render_json_block(data: Any) -> None:
+    st.markdown(f'<div class="code-preview">{html.escape(_json_dumps_pretty(data))}</div>', unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  Ollama 调用
+# ══════════════════════════════════════════════════════════════════
+
+def call_ollama_labor(model: str, prompt: str, timeout: int = 300) -> str:
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": "你是一位谨慎、可靠的劳动法律师助理。你不能出具正式法律意见书，不能代替执业律师，不能对案件结果做出保证。",
+            },
+            {"role": "user", "content": prompt},
+        ],
+        "stream": False,
+        "options": {"temperature": 0, "top_p": 0.9, "num_predict": 1536},
+    }
+    response = requests.post(OLLAMA_URL, json=payload, timeout=timeout)
+    response.raise_for_status()
+    data = response.json()
+    return (data.get("message", {}) or {}).get("content", "").strip()
+
+
+def parse_labor_model_output(raw_output: str) -> dict[str, Any]:
+    parsed = try_parse_json(raw_output)
+    if not isinstance(parsed, dict):
+        return {
+            "ok": False,
+            "raw_output": raw_output,
+            "parse_error": "无法解析为合法 JSON",
+            "user_explanation": "",
+            "structured_analysis": {},
+            "error": "模型输出不是合法 JSON",
+        }
+    user_explanation = str(parsed.get("user_explanation", "") or "").strip()
+    structured = parsed.get("structured_analysis", {})
+    if not isinstance(structured, dict):
+        return {
+            "ok": False,
+            "raw_output": raw_output,
+            "parse_error": "structured_analysis 不是对象",
+            "user_explanation": user_explanation,
+            "structured_analysis": {},
+            "error": "structured_analysis 不是合法对象",
+        }
+    return {
+        "ok": True,
+        "raw_output": raw_output,
+        "user_explanation": user_explanation,
+        "structured_analysis": structured,
+    }
+
+
+def run_model_pipeline(case_text: str, selected_models: List[str]) -> None:
+    reset_labor_state()
+    st.session_state["labor_case_text"] = case_text
+
+    # Use v2 prompt if BERT available, otherwise use legacy
+    if _BERT_AVAILABLE:
+        prompt = build_labor_prompt_v2(case_text)
+    else:
+        from labor_law_app.bert_prompts import build_labor_prompt
+        prompt = build_labor_prompt(case_text)
+
+    progress = st.progress(0.0)
+    status = st.empty()
+    results: dict[str, Any] = {}
+    times: dict[str, float] = {}
+    error_count = 0
+
+    for idx, model_name in enumerate(selected_models, start=1):
+        st.session_state["labor_model_running"] = model_name
+        status.info(f"正在调用 {model_ui_name(model_name)} ({idx}/{len(selected_models)})")
+        start = time.time()
+        try:
+            raw_output = call_ollama_labor(model_name, prompt)
+            parsed_payload = parse_labor_model_output(raw_output)
+            if not parsed_payload.get("ok"):
+                error_count += 1
+            results[model_name] = parsed_payload
+        except Exception as ex:
+            error_count += 1
+            results[model_name] = {
+                "ok": False,
+                "raw_output": "",
+                "parse_error": "",
+                "user_explanation": "",
+                "structured_analysis": {},
+                "error": f"{type(ex).__name__}: {ex}",
+            }
+        times[model_name] = time.time() - start
+        progress.progress(idx / len(selected_models))
+
+    st.session_state["labor_model_running"] = ""
+    st.session_state["labor_results"] = results
+    st.session_state["labor_times"] = times
+    st.session_state["labor_error"] = (
+        f"共有 {error_count} 个模型未成功返回可解析结果。" if error_count else ""
+    )
+    if error_count:
+        status.warning(st.session_state["labor_error"])
+    else:
+        status.success(f"全部 {len(selected_models)} 个模型调用完成。")
+
+
+# ══════════════════════════════════════════════════════════════════
+#  Step 1 — 案件输入
+# ══════════════════════════════════════════════════════════════════
+
+def render_step1_input() -> None:
+    render_step_header(1, "案件信息输入", "输入劳动争议案件的自然语言描述")
+    case_text = st.text_area(
+        "案件描述",
+        value=st.session_state["labor_case_text"],
+        height=180,
+        placeholder="例：劳动者2023年3月入职一家科技公司，一直未签书面劳动合同，2024年4月被口头辞退，主张双倍工资和违法解除赔偿金。月薪8000元，有银行工资流水但没有劳动合同。",
+        key="case_text_input",
+    )
+    st.session_state["labor_case_text"] = case_text
+
+    col1, col2 = st.columns(2)
+    with col1:
+        selected_models = st.multiselect(
+            "选择要调用的模型",
+            options=MODELS,
+            default=MODELS[:2],
+            format_func=model_ui_name,
+        )
+    with col2:
+        use_rule_baseline = st.checkbox(
+            "纯规则基线模式（不调用 LLM）",
+            value=False,
+            help="不调用任何大模型，仅使用规则引擎抽取事实和法条，秒级出结果。",
+        )
+
+    if st.button("⚖️ 开始四模型分析", use_container_width=True, type="primary"):
+        if not case_text.strip():
+            st.warning("请先输入案件描述。")
+        elif use_rule_baseline:
+            reset_labor_state()
+            st.session_state["labor_case_text"] = case_text.strip()
+            st.session_state["labor_results"] = {}
+            st.session_state["labor_times"] = {}
+            st.success("已切换至规则基线模式。")
+        elif not selected_models:
+            st.warning("请至少选择一个模型。")
+        else:
+            run_model_pipeline(case_text.strip(), selected_models)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  Step 3 — 模型分析结果（user_explanation + structured_analysis）
+# ══════════════════════════════════════════════════════════════════
+
+def _format_structured_cell(value: Any) -> str:
+    if isinstance(value, list):
+        return " · ".join(str(item) for item in value) if value else "未返回"
+    if value is None:
+        return "未返回"
+    text = str(value).strip()
+    return text or "未返回"
+
+
+def render_model_explanations(results: dict[str, Any], times: dict[str, float]) -> None:
+    rows = []
+    for model_name in MODELS:
+        if model_name not in results:
+            continue
+        payload = results.get(model_name, {}) or {}
+        if payload.get("ok"):
+            model_status = "已完成"
+            explanation = (payload.get("user_explanation") or "").strip() or "模型未返回 user_explanation"
+        elif payload.get("parse_error"):
+            model_status = "解析失败"
+            explanation = payload.get("error") or "JSON 解析失败"
+        else:
+            model_status = "调用异常"
+            explanation = payload.get("error") or "模型调用失败"
+        rows.append({
+            "模型": model_ui_name(model_name),
+            "状态": model_status,
+            "耗时（秒）": f"{times.get(model_name, 0.0):.2f}",
+            "法律初步分析": explanation,
+        })
+    render_light_table(rows, ["模型", "状态", "耗时（秒）", "法律初步分析"])
+
+    with st.expander("查看单模型原始输出与结构化分析", expanded=False):
+        for model_name in MODELS:
+            if model_name not in results:
+                continue
+            payload = results.get(model_name, {}) or {}
+            model_status = "已完成" if payload.get("ok") else ("解析失败" if payload.get("parse_error") else "调用异常")
+            st.markdown(f"""
+            <div class="soft-card">
+                <div class="model-card-title">{html.escape(model_ui_name(model_name))}</div>
+                <div class="small-caption">{html.escape(model_name)}</div>
+                <div style="margin-top: 0.45rem;">{_badge_html("状态", model_status)}</div>
+            </div>
+            """, unsafe_allow_html=True)
+            if payload.get("error"):
+                st.warning(payload["error"])
+            if payload.get("user_explanation"):
+                st.markdown("**📝 自然语言分析**")
+                st.write(payload["user_explanation"])
+            if payload.get("structured_analysis"):
+                st.markdown("**📊 结构化判断 (structured_analysis)**")
+                _render_json_block(payload["structured_analysis"])
+            if payload.get("raw_output"):
+                with st.expander(f"查看 {model_ui_name(model_name)} 原始输出", expanded=False):
+                    st.code(payload["raw_output"][:3000], language="json")
+
+
+def render_structured_comparison(results: dict[str, Any]) -> None:
+    present_models = [m for m in MODELS if m in results]
+    if not present_models:
+        st.info("暂无模型结果")
+        return
+    model_cols = [model_ui_name(m) for m in present_models]
+
+    rows: list[dict[str, Any]] = []
+    for item in LABOR_OBJECTS:
+        oid = item["object_id"]
+        values: dict[str, str] = {}
+        for model_name in present_models:
+            structured = (results.get(model_name, {}) or {}).get("structured_analysis", {}) or {}
+            values[model_name] = _format_structured_cell(structured.get(oid))
+
+        # Detect disagreement: are there at least 2 distinct non-empty values?
+        non_empty = [v for v in values.values() if v and v != "未返回"]
+        has_disagreement = len(set(non_empty)) >= 2
+
+        row = {"维度": item["label"]}
+        for model_name in present_models:
+            val = values[model_name]
+            if has_disagreement and val and val != "未返回":
+                row[model_ui_name(model_name)] = f"<strong><em>{html.escape(val)}</em></strong>"
+            else:
+                row[model_ui_name(model_name)] = html.escape(val)
+        rows.append(row)
+
+    # Render with HTML-safe cells
+    header_html = "".join(f"<th>{html.escape(str(col))}</th>" for col in (["维度"] + model_cols))
+    body_rows: list[str] = []
+    for row in rows:
+        cells = "".join(f"<td>{row.get(col, '')}</td>" for col in (["维度"] + model_cols))
+        body_rows.append(f"<tr>{cells}</tr>")
+    st.markdown(f"""
+    <div class="light-table-wrap">
+        <table class="light-table">
+            <thead><tr>{header_html}</tr></thead>
+            <tbody>{''.join(body_rows)}</tbody>
+        </table>
+    </div>
+    <div class="small-caption" style="margin-top: 0.3rem;"><strong><em>加粗斜体</em></strong> = 各模型判断不一致，需重点关注</div>
+    """, unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  Step 4 — BERT 案件语义画像
+# ══════════════════════════════════════════════════════════════════
+
+def render_bert_profile() -> None:
+    case_text = st.session_state.get("labor_case_text", "")
+    if not case_text or not _BERT_AVAILABLE:
+        return
+
+    try:
+        bert_proc = BERTProcessor.get_instance()
+        input_proc = BERTInputProcessor(bert_proc)
+        profile = input_proc.analyze_case(case_text)
+        st.session_state["labor_bert_profile"] = profile.to_dict()
+
+        cols = st.columns(5)
+        axes = [
+            ("劳动关系信号", "employment_relation_score"),
+            ("证据充分性", "evidence_completeness"),
+            ("雇主违法程度", "employer_conduct_severity"),
+            ("法定违规可能", "statutory_violation_score"),
+            ("诉求强度", "claim_strength_signal"),
+        ]
+        for i, (label, key) in enumerate(axes):
+            val = getattr(profile, key, 0.5)
+            with cols[i]:
+                st.metric(label, f"{val:.2f}")
+                st.progress(min(max(val, 0.0), 1.0))
+
+        # Show profile hint
+        hint = build_profile_hint(profile)
+        if hint:
+            st.markdown(f"""
+            <div class="soft-card">
+                <div class="small-caption" style="margin-bottom:0.3rem;">📋 案件背景提示（已注入 LLM prompt）</div>
+                <div class="muted-text">{html.escape(hint)}</div>
+            </div>
+            """, unsafe_allow_html=True)
+    except Exception as e:
+        st.warning(f"BERT 画像生成失败: {e}")
+
+
+# ══════════════════════════════════════════════════════════════════
+#  Step 6 — 归一化
+# ══════════════════════════════════════════════════════════════════
+
+def _fact_table_rows(table: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = []
+    for row in table:
+        rows.append({
+            "模型": model_ui_name(str(row.get("model", ""))),
+            "维度": OBJECT_LABELS.get(str(row.get("object_id", "")), str(row.get("object_id", ""))),
+            "facts": " · ".join(str(item) for item in row.get("facts", []) or []) or "(空)",
+        })
+    return rows
+
+
+def render_normalization() -> None:
+    results: dict = st.session_state.get("labor_results") or {}
+    case_text: str = st.session_state.get("labor_case_text", "") or ""
+
+    if not results or not case_text:
+        # Rule baseline
+        if not results and case_text:
+            # Only rule baseline available
+            pass
+        return
+
+    if st.button("🔬 运行归一化", use_container_width=True, key="btn_run_normalize", type="primary"):
+        try:
+            model_outputs = {}
+            for model_name in MODELS:
+                if model_name not in results:
+                    continue
+                payload = results.get(model_name, {}) or {}
+                model_outputs[model_name] = {
+                    "user_explanation": payload.get("user_explanation", ""),
+                    "structured_analysis": payload.get("structured_analysis", {}),
+                }
+
+            normalized_all = normalize_all_models_labor_outputs(
+                model_outputs,
+                user_text=case_text,
+            )
+            st.session_state["labor_normalized_all"] = normalized_all
+            st.session_state["labor_error"] = ""
+        except Exception as ex:
+            st.session_state["labor_error"] = f"归一化失败：{type(ex).__name__}: {ex}"
+
+    if st.session_state.get("labor_error") and "归一化失败" in st.session_state["labor_error"]:
+        st.error(st.session_state["labor_error"])
+
+    normalized_all = st.session_state.get("labor_normalized_all")
+    if not normalized_all:
+        return
+
+    st.markdown("""
+    <div class="section-card">
+        <div class="muted-text">
+            <strong>三层区分：</strong> user_explanation 是模型给用户的自然语言分析；
+            structured_analysis 是模型原始结构化回答；
+            normalized 是前端展示用归一化结果；
+            TruthFinder 默认输入来自 from_model_fields + exclude_fallbacks=True。
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    normalized_table = build_labor_fact_table(normalized_all, source="normalized")
+    with st.expander("查看前端归一化结果（source=normalized）", expanded=True):
+        render_light_table(_fact_table_rows(normalized_table), ["模型", "维度", "facts"])
+
+    tf_input_table = build_labor_fact_table(
+        normalized_all, source="from_model_fields", exclude_fallbacks=True,
+    )
+    with st.expander("查看 TruthFinder 输入预览（from_model_fields, exclude_fallbacks=True）", expanded=False):
+        render_light_table(_fact_table_rows(tf_input_table), ["模型", "维度", "facts"])
+
+    with st.expander("查看归一化 warnings 与安全补丁", expanded=False):
+        for model_name in MODELS:
+            if model_name not in normalized_all:
+                continue
+            payload = normalized_all.get(model_name, {}) or {}
+            st.markdown(f"""
+            <div class="soft-card">
+                <div class="model-card-title">{html.escape(model_ui_name(model_name))}</div>
+                <div class="small-caption">{html.escape(model_name)}</div>
+            </div>
+            """, unsafe_allow_html=True)
+            warnings = payload.get("warnings", []) or []
+            patches = ((payload.get("patches", {}) or {}).get("from_user_text", [])) or []
+            if warnings:
+                st.write("warnings:")
+                _render_json_block(warnings)
+            else:
+                st.caption("无 warnings")
+            if patches:
+                st.write("from_user_text patches:")
+                _render_json_block(patches)
+            else:
+                st.caption("无 patches")
+
+
+# ══════════════════════════════════════════════════════════════════
+#  Step 7 — TruthFinder
+# ══════════════════════════════════════════════════════════════════
+
+def render_truthfinder() -> None:
+    normalized_all = st.session_state.get("labor_normalized_all")
+    results = st.session_state.get("labor_results") or {}
+
+    if not normalized_all:
+        st.info("请先完成归一化。")
+        return
+
+    # Determine which models actually participated
+    active_models = [m for m in MODELS if m in normalized_all]
+
+    if st.button("🔍 运行 TruthFinder 可信聚合", use_container_width=True, key="btn_run_tf", type="primary"):
+        try:
+            t_score, s_score, cand_map, debug_info = labor_truthfinder_run(
+                models=active_models,
+                case_id="case_0",
+                normalized_all=normalized_all,
+                source="from_model_fields",
+                exclude_fallbacks=True,
+                support_mode="multi",
+                return_debug=True,
+            )
+            truth_rows = explain_truth_per_labor_object(
+                case_id="case_0",
+                s_score=s_score,
+                cand_map=cand_map,
+                support=debug_info.get("support"),
+            )
+            st.session_state["labor_truthfinder_payload"] = {
+                "t_score": t_score,
+                "s_score": s_score,
+                "cand_map": cand_map,
+                "debug_info": _json_safe(debug_info),
+                "truth_rows": truth_rows,
+            }
+            st.session_state["labor_error"] = ""
+        except Exception as ex:
+            st.session_state["labor_error"] = f"TruthFinder 运行失败：{type(ex).__name__}: {ex}"
+
+    if st.session_state.get("labor_error") and "TruthFinder 运行失败" in st.session_state["labor_error"]:
+        st.error(st.session_state["labor_error"])
+
+    tf_payload = st.session_state.get("labor_truthfinder_payload")
+    if not tf_payload:
+        return
+
+    t_score = tf_payload.get("t_score", {}) or {}
+    truth_rows = tf_payload.get("truth_rows", []) or []
+    debug_info = tf_payload.get("debug_info", {}) or {}
+
+    # Trust ranking
+    rank_rows = [
+        {"排名": idx + 1, "模型": model_ui_name(m), "可信度": f"{float(s):.4f}"}
+        for idx, (m, s) in enumerate(rank_models_by_trust(t_score))
+    ]
+    st.markdown("#### 模型可信度排名")
+    render_light_table(rank_rows, ["排名", "模型", "可信度"])
+
+    # Object summary
+    summary_rows = []
+    for row in truth_rows:
+        selected_facts = row.get("selected_facts", []) or []
+        selected_conf = row.get("selected_conf", []) or []
+        summary_rows.append({
+            "维度": OBJECT_LABELS.get(row.get("object_id", ""), row.get("object_id", "")),
+            "聚合可信结果": " · ".join(selected_facts) if selected_facts else "(空)",
+            "置信度": " · ".join(f"{float(c):.3f}" for c in selected_conf) if selected_conf else "0.000",
+            "候选数": len(row.get("candidates", []) or []),
+        })
+    st.markdown("#### 七个维度的聚合可信结果")
+    render_light_table(summary_rows, ["维度", "聚合可信结果", "置信度", "候选数"])
+
+    # Detail per object
+    with st.expander("查看候选 fact 置信度明细", expanded=False):
+        for row in truth_rows:
+            st.markdown(f"**{OBJECT_LABELS.get(row.get('object_id', ''), row.get('object_id', ''))}**")
+            cand_rows = []
+            for c in (row.get("candidates", []) or []):
+                support_by = c.get("support_by_model", {}) or {}
+                support_str = " · ".join(
+                    f"{model_ui_name(m)}:{float(w):.3f}"
+                    for m, w in support_by.items() if float(w) > 0
+                ) or "(空)"
+                cand_rows.append({
+                    "排名": c.get("rank"),
+                    "事实": c.get("fact"),
+                    "置信度": f"{float(c.get('confidence', 0)):.4f}",
+                    "选中": "✅" if c.get("is_selected") else "",
+                    "支持模型": support_str,
+                })
+            render_light_table(cand_rows, ["排名", "事实", "置信度", "选中", "支持模型"])
+
+    # Debug
+    with st.expander("查看 TruthFinder debug 信息", expanded=False):
+        _render_json_block(debug_info)
+
+    # BERT report (divergence + confidence)
+    if _BERT_AVAILABLE:
+        try:
+            report_gen = BERTReportGenerator()
+            divergences = report_gen.compute_divergence(truth_rows, t_score)
+            confidences = report_gen.compute_confidence(truth_rows, t_score)
+
+            div_rows = []
+            for oid, d in divergences.items():
+                div_rows.append({
+                    "维度": OBJECT_LABELS.get(oid, oid),
+                    "分歧度": d.divergence_level,
+                    "模型一致性": f"{d.inter_model_agreement_rate:.2%}",
+                    "解读": d.interpretation,
+                })
+            st.markdown("#### BERT 分歧度分析")
+            render_light_table(div_rows, ["维度", "分歧度", "模型一致性", "解读"])
+
+            conf_rows = []
+            for oid, c in confidences.items():
+                conf_rows.append({
+                    "维度": OBJECT_LABELS.get(oid, oid),
+                    "置信度": c.confidence_level,
+                    "综合得分": f"{c.overall_confidence:.3f}",
+                    "注意事项": "；".join(c.caveats) if c.caveats else "无",
+                })
+            st.markdown("#### BERT 置信度分析")
+            render_light_table(conf_rows, ["维度", "置信度", "综合得分", "注意事项"])
+        except Exception as e:
+            st.warning(f"BERT 报告生成失败: {e}")
+
+
+# ══════════════════════════════════════════════════════════════════
+#  Step 8 — 律师综合报告（模板生成，不额外调 LLM）
+# ══════════════════════════════════════════════════════════════════
+
+def build_final_labor_report() -> str:
+    tf_payload = st.session_state.get("labor_truthfinder_payload") or {}
+    truth_rows = tf_payload.get("truth_rows", []) or []
+    t_score = tf_payload.get("t_score", {}) or {}
+
+    row_map = {row.get("object_id"): row for row in truth_rows}
+
+    lines = []
+    lines.append("## 劳动争议案件综合分析报告")
+    lines.append("")
+
+    # 1. 法律关系认定
+    rel_row = row_map.get("relationship_type")
+    rel_fact = "未确定"
+    if rel_row:
+        sel = rel_row.get("selected_facts", []) or []
+        rel_fact = sel[0] if sel else "未确定"
+    lines.append(f"**法律关系认定**：{rel_fact}")
+
+    # 2. 裁判倾向
+    adj_row = row_map.get("adjudication_tendency")
+    adj_fact = "未确定"
+    if adj_row:
+        sel = adj_row.get("selected_facts", []) or []
+        adj_fact = sel[0] if sel else "未确定"
+    lines.append(f"**裁判/处理倾向初筛**：{adj_fact}")
+
+    # 3. 核心争议
+    disp_row = row_map.get("dispute_focus")
+    if disp_row:
+        sel = disp_row.get("selected_facts", []) or []
+        if sel:
+            lines.append(f"**核心争议类型**：{'、'.join(sel)}")
+
+    # 4. 关键事实
+    fact_row = row_map.get("key_fact")
+    if fact_row:
+        sel = fact_row.get("selected_facts", []) or []
+        real = [f for f in sel if "不足" not in f and "待补充" not in f]
+        if real:
+            lines.append(f"**已识别关键事实**：{'、'.join(real)}")
+        gaps = [f for f in sel if "不足" in f or "待补充" in f]
+        if gaps:
+            lines.append(f"**证据不足项**：{'、'.join(gaps)}")
+
+    # 5. 重点法条
+    art_row = row_map.get("article_reference")
+    if art_row:
+        sel = art_row.get("selected_facts", []) or []
+        if sel:
+            lines.append(f"**重点法条方向**：{'、'.join(sel[:8])}")
+
+    # 6. 背景
+    bg_row = row_map.get("background")
+    if bg_row:
+        sel = bg_row.get("selected_facts", []) or []
+        non_default = [b for b in sel if "无特殊" not in b]
+        if non_default:
+            lines.append(f"**重要背景信息**：{'、'.join(non_default)}")
+
+    lines.append("")
+
+    # 7. 模型可信度
+    n_models = len(t_score)
+    if n_models > 1:
+        lines.append(f"**模型可信度排行**（共 {n_models} 个模型）：")
+        for m, s in sorted(t_score.items(), key=lambda x: x[1], reverse=True):
+            lines.append(f"  - {model_ui_name(m)}：可信度 {float(s):.4f}")
+    elif n_models == 1:
+        m = list(t_score.keys())[0]
+        lines.append(f"**注意**：当前仅使用 1 个模型（{model_ui_name(m)}），无法发挥 TruthFinder 多源交叉验证优势。建议至少使用 2 个不同模型族的模型。")
+
+    lines.append("")
+
+    # 8. 证据缺口 & 下一步
+    all_gaps = []
+    for row in truth_rows:
+        for c in (row.get("candidates", []) or []):
+            if c.get("is_selected") and ("不足" in str(c.get("fact", "")) or "待补充" in str(c.get("fact", ""))):
+                all_gaps.append(f"{row.get('object_label', '')}: {c.get('fact', '')}")
+
+    if all_gaps:
+        lines.append("**证据缺口及补充建议**：")
+        for g in all_gaps[:5]:
+            lines.append(f"  - ⚠️ {g}")
+        lines.append("  - 📋 建议补充：书面劳动合同、工资银行流水、考勤记录、解除通知原件、社保缴纳记录、培训服务期协议、竞业限制协议及补偿记录")
+        lines.append("  - ⏰ 如涉及仲裁或诉讼，请注意劳动争议调解仲裁法第 27 条关于仲裁时效的规定（一般为一年）")
+
+    lines.append("")
+    lines.append("---")
+    lines.append("**免责声明**：本报告由多模型 TruthFinder 可信聚合系统自动生成，不构成正式法律意见。法律判断请以执业律师结合全部案件材料后的专业意见为准。引用法条请以国家法律法规数据库公布的最新有效文本为准。")
+
+    return "\n".join(lines)
+
+
+def render_final_report() -> None:
+    if not st.session_state.get("labor_truthfinder_payload"):
+        st.info("请先完成 TruthFinder 聚合。")
+        return
+
+    # Try BERT comprehensive report first
+    if _BERT_AVAILABLE:
+        try:
+            tf_payload = st.session_state.get("labor_truthfinder_payload") or {}
+            report_gen = BERTReportGenerator()
+            report = report_gen.generate_comprehensive_report(
+                case_id="case_0",
+                case_text=st.session_state.get("labor_case_text", ""),
+                truth_rows=tf_payload.get("truth_rows", []),
+                t_score=tf_payload.get("t_score", {}),
+            )
+            st.session_state["labor_final_report"] = report
+            st.json(report.to_dict())
+            return
+        except Exception as e:
+            st.warning(f"BERT 综合报告生成失败，回退至模板报告: {e}")
+
+    # Fallback to template
+    report_text = build_final_labor_report()
+    st.session_state["labor_final_report"] = report_text
+    st.text_area("律师综合报告", value=report_text, height=400, key="final_report_display")
+
+
+# ══════════════════════════════════════════════════════════════════
+#  Step 9 — ZK
+# ══════════════════════════════════════════════════════════════════
+
+def _reset_zk_state() -> None:
+    st.session_state["zk_pipeline_result"] = None
+    st.session_state["zk_verification_ran"] = False
+    st.session_state["zk_stage_status"] = "未启动"
+    st.session_state["zk_error"] = ""
+
+
+def _zk_badge(status: str) -> str:
+    cls_map = {
+        "未启动": "is-pending", "运行中": "is-info", "已完成": "is-success",
+        "验证通过": "is-success", "验证失败": "is-error", "已生成": "is-success",
+        "失败": "is-error",
+    }
+    css = cls_map.get(status, "is-pending")
+    return f'<span class="status-badge {css}">{status}</span>'
+
+
+def render_zk() -> None:
+    if not _ZK_AVAILABLE:
+        st.info("零知识证明模块尚未就绪。")
+        return
+
+    truthfinder = st.session_state.get("labor_truthfinder_payload")
+    if not truthfinder:
+        st.info("🔒 请先完成 TruthFinder 聚合，才能进行零知识证明验证。")
+        return
+
+    trust_rank = truthfinder.get("truth_rows", []) or []
+    n_models = len(st.session_state.get("labor_results", {}) or {})
+    if n_models < 2:
+        st.warning("⚠️ 需要至少 2 个模型才能进行有意义的 ZK 验证。")
+        return
+
+    status = st.session_state.get("zk_stage_status", "未启动")
+
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.markdown(f"""<div style="background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:0.8rem;text-align:center;">
+            <div style="font-size:0.75rem;color:#64748b;margin-bottom:0.25rem;">电路状态</div>
+            <div style="font-weight:700;font-size:0.95rem;">Circom v2</div>
+        </div>""", unsafe_allow_html=True)
+    with col2:
+        st.markdown(f"""<div style="background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:0.8rem;text-align:center;">
+            <div style="font-size:0.75rem;color:#64748b;margin-bottom:0.25rem;">证明对象</div>
+            <div style="font-weight:700;font-size:0.95rem;">M={n_models} K=7 N≤8</div>
+        </div>""", unsafe_allow_html=True)
+    with col3:
+        st.markdown(f"""<div style="background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:0.8rem;text-align:center;">
+            <div style="font-size:0.75rem;color:#64748b;margin-bottom:0.25rem;">迭代</div>
+            <div style="font-weight:700;font-size:0.95rem;">15 轮 Q16</div>
+        </div>""", unsafe_allow_html=True)
+    with col4:
+        st.markdown(f"""<div style="background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:0.8rem;text-align:center;">
+            <div style="font-size:0.75rem;color:#64748b;margin-bottom:0.25rem;">证明状态</div>
+            {_zk_badge(status)}
+        </div>""", unsafe_allow_html=True)
+
+    st.markdown("---")
+
+    if st.session_state.get("zk_error"):
+        st.error(st.session_state["zk_error"])
+
+    c1, c2, c3 = st.columns([1, 1, 2])
+    with c1:
+        if st.button("🔒 生成电路证明", use_container_width=True, type="primary",
+                      disabled=(status == "运行中"), key="btn_zk_generate"):
+            _reset_zk_state()
+            st.session_state["zk_stage_status"] = "运行中"
+            try:
+                normalized_all = st.session_state["labor_normalized_all"] or {}
+                case_text = st.session_state["labor_case_text"] or ""
+                used_models = [m for m in MODELS if m in (st.session_state.get("labor_results") or {})]
+                if len(used_models) < 2:
+                    used_models = list(MODELS[:2])
+
+                with st.status("正在生成零知识证明…", expanded=True) as zk_status:
+                    st.write("1/3 正在收集 ZK 状态…")
+                    pipeline_result = run_full_labor_zk_pipeline(
+                        case_id="labor_case_0",
+                        case_text=case_text,
+                        model_ids=used_models,
+                        normalized_all=normalized_all,
+                        truthfinder_payload=truthfinder,
+                    )
+                    st.write("2/3 电路参考执行完成…")
+                    st.write("3/3 正在与前端结果对比…")
+                    st.session_state["zk_pipeline_result"] = pipeline_result
+                    st.session_state["zk_verification_ran"] = True
+                    st.session_state["zk_stage_status"] = "已完成"
+                    st.session_state["zk_model_ids"] = used_models
+                    zk_status.update(label="电路证明生成完成", state="complete")
+            except Exception as exc:
+                import traceback
+                st.session_state["zk_error"] = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
+                st.session_state["zk_stage_status"] = "失败"
+            st.rerun()
+
+    with c2:
+        zk_result = st.session_state.get("zk_pipeline_result")
+        if st.button("✅ 验证一致性", use_container_width=True,
+                      disabled=not (zk_result and st.session_state.get("zk_verification_ran")),
+                      key="btn_zk_verify"):
+            if zk_result:
+                verification = zk_result.get("verification", {})
+                circom_input = zk_result.get("circom_input", {})
+                if verification and circom_input:
+                    try:
+                        re_verify = run_labor_zk_verification(circom_input, truthfinder)
+                        zk_result["verification"] = re_verify
+                        st.session_state["zk_pipeline_result"] = zk_result
+                    except Exception as exc:
+                        st.session_state["zk_error"] = f"重新验证失败: {exc}"
+                st.rerun()
+
+    with c3:
+        if st.button("🗑 清除 ZK 结果", use_container_width=True, key="btn_zk_clear"):
+            _reset_zk_state()
+            st.rerun()
+
+    zk_result = st.session_state.get("zk_pipeline_result")
+    if not zk_result:
+        return
+
+    verification = zk_result.get("verification", {})
+    if not verification.get("success"):
+        st.error(f"ZK 验证失败: {verification.get('error', '未知错误')}")
+        return
+
+    st.markdown("---")
+    st.markdown("### 📊 验证结果")
+    verdict = verification.get("verdict", "")
+    if "完全一致" in str(verdict):
+        st.success(verdict)
+    elif "部分一致" in str(verdict):
+        st.warning(verdict)
+    else:
+        st.error(verdict)
+
+    model_compare = verification.get("model_comparison", [])
+    if model_compare:
+        st.markdown("#### 模型可信度对比")
+        mc_rows = [{
+            "模型": r.get("model", "?"),
+            "电路信任度": f"{r.get('ref_trust', 0):.4f}",
+            "前端信任度": f"{r.get('front_trust', 0):.4f}",
+            "差异": f"{r.get('delta', 0):.6f}",
+            "一致性": "✅" if r.get("consistent") else "⚠️",
+        } for r in model_compare]
+        render_light_table(mc_rows, ["模型", "电路信任度", "前端信任度", "差异", "一致性"])
+
+    obj_compare = verification.get("object_comparison", [])
+    if obj_compare:
+        st.markdown("#### 各维度胜出事实对比")
+        oc_rows = [{
+            "维度": r.get("object_label", "?"),
+            "电路胜出": r.get("ref_winner", "—"),
+            "前端胜出": r.get("front_winner", "—"),
+            "一致性": "✅" if r.get("consistent") else "❌",
+        } for r in obj_compare]
+        render_light_table(oc_rows, ["维度", "电路胜出", "前端胜出", "一致性"])
+
+    with st.expander("🔧 技术细节", expanded=False):
+        ref_out = verification.get("reference_output", {})
+        st.json({
+            "best_model_idx": ref_out.get("best_model_idx"),
+            "best_model_score_q16": ref_out.get("best_model_score_q16"),
+            "winning_fact_idx_by_object": ref_out.get("winning_fact_idx_by_object"),
+            "t_final": ref_out.get("t_final"),
+        })
+
+
+# ══════════════════════════════════════════════════════════════════
+#  Main
+# ══════════════════════════════════════════════════════════════════
+
+def main() -> None:
+    inject_css()
+    init_session_state()
+
+    render_header()
+    render_labor_disclaimer()
+    render_flow_status()
+
+    # Step 1: Input
+    render_step1_input()
+
+    if st.session_state.get("labor_error") and "归一化失败" not in str(st.session_state["labor_error"]) \
+            and "TruthFinder" not in str(st.session_state["labor_error"]):
+        st.error(st.session_state["labor_error"])
+
+    results = st.session_state.get("labor_results")
+    times = st.session_state.get("labor_times")
+
+    if results is not None:
+        st.divider()
+
+        if results:
+            # Step 3: Model outputs
+            render_step_header(3, "四模型分析结果", "优先展示 user_explanation 自然语言分析，可展开查看结构化 JSON")
+            render_model_explanations(results, times or {})
+
+            # Step 4: BERT profile
+            if _BERT_AVAILABLE:
+                st.divider()
+                render_step_header(4, "BERT 案件语义画像", "基于 BERT 锚定法提取的 5 维语义特征")
+                render_bert_profile()
+
+            # Step 5: Structured comparison
+            st.divider()
+            render_step_header(5, "结构化七维度对比", "七个维度 × 各模型的原始结构化判断")
+            with st.expander("查看七维度结构化判断对比", expanded=True):
+                render_structured_comparison(results)
+
+            # Step 6: Normalization
+            st.divider()
+            render_step_header(6, "归一化", "normalized 用于前端展示；TruthFinder 默认输入来自 from_model_fields + exclude_fallbacks=True")
+            render_normalization()
+
+        elif results is not None and not results:
+            # Rule baseline mode
+            st.divider()
+            render_step_header(2, "规则基线模式", "未调用 LLM，使用规则引擎直接从案件文本抽取事实和法条")
+            case_text = st.session_state.get("labor_case_text", "")
+            if case_text:
+                try:
+                    patch = extract_case_fact_patch(case_text)
+                    st.markdown("#### 规则引擎抽取结果")
+                    _render_json_block(patch)
+
+                    # Auto-normalize rule baseline
+                    from labor_law_app.api import analyze_labor_case
+                    api_result = analyze_labor_case({"case_text": case_text})
+                    st.session_state["labor_normalized_all"] = api_result.get("normalized_by_source", {})
+                    st.session_state["labor_truthfinder_payload"] = api_result.get("truthfinder", {})
+
+                    # Show rule baseline results
+                    st.divider()
+                    render_step_header(2, "规则基线分析结果", "基于关键词和正则匹配的直接法条映射")
+                    issue_kw = api_result.get("issue_keywords", []) or []
+                    articles = api_result.get("article_candidates", []) or []
+                    evidence_gaps = api_result.get("evidence_gaps", []) or []
+                    lawyer_brief = api_result.get("lawyer_brief", {}) or {}
+
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        st.markdown("**争议关键词**")
+                        if issue_kw:
+                            kw_rows = [{"关键词": kw.get("keyword", kw) if isinstance(kw, dict) else str(kw),
+                                        "置信度": f"{float(kw.get('confidence', 1.0)):.2f}" if isinstance(kw, dict) else "1.00"}
+                                       for kw in issue_kw]
+                            render_light_table(kw_rows, ["关键词", "置信度"])
+                    with col_b:
+                        st.markdown("**候选法条**")
+                        if articles:
+                            art_rows = [{"法条": a.get("article_label", a.get("label", str(a))),
+                                         "来源": str(a.get("source", "规则")),
+                                         "摘要": str(a.get("summary", ""))[:80]}
+                                        for a in articles[:8]]
+                            render_light_table(art_rows, ["法条", "来源", "摘要"])
+
+                    if evidence_gaps:
+                        st.markdown("**证据缺口**")
+                        for g in evidence_gaps:
+                            st.markdown(f"- ⚠️ {g}")
+
+                    if lawyer_brief:
+                        st.markdown("**律师工作摘要**")
+                        st.json(lawyer_brief)
+                except Exception as e:
+                    st.error(f"规则基线分析失败: {e}")
+
+    # Step 7: TruthFinder
+    if st.session_state.get("labor_normalized_all"):
+        st.divider()
+        render_step_header(7, "TruthFinder 可信聚合", "多模型交叉验证，迭代置信度传播")
+        render_truthfinder()
+
+    # Step 8: Final report
+    if st.session_state.get("labor_truthfinder_payload"):
+        st.divider()
+        render_step_header(8, "律师综合报告", "基于 TruthFinder 聚合结果 + BERT 分歧度/置信度分析，模板生成，不额外调用 LLM")
+        render_final_report()
+
+    # Step 9: ZK
+    if st.session_state.get("labor_truthfinder_payload"):
+        st.divider()
+        render_step_header(9, "零知识证明验证", "Groth16 电路参考 — 验证 TruthFinder 计算完整性")
+        render_zk()
+
+    # Footer
+    st.divider()
+    render_labor_disclaimer()
 
 
 if __name__ == "__main__":
