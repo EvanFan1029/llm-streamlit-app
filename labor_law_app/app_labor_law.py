@@ -623,6 +623,66 @@ def render_structured_comparison(results: dict[str, Any]) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════
+#  BERT 匹配过程可视化
+# ══════════════════════════════════════════════════════════════════
+
+def render_bert_matching_visualization(results: dict[str, Any]) -> None:
+    if not _BERT_AVAILABLE:
+        st.info("BERT 模块未加载，无法展示匹配过程")
+        return
+    if not results:
+        return
+
+    bert = BERTProcessor.get_instance()
+    if not bert.is_loaded:
+        bert._ensure_loaded()
+    output_proc = BERTOutputProcessor(bert)
+
+    for model_name in MODELS:
+        if model_name not in results:
+            continue
+        payload = results.get(model_name, {}) or {}
+        model_label = model_ui_name(model_name)
+        structured = payload.get("structured_analysis", {}) or {}
+
+        with st.expander(f"🔍 {model_label} → BERT 语义匹配详情", expanded=False):
+            for item in LABOR_OBJECTS:
+                oid = item["object_id"]
+                label = item["label"]
+                raw_value = structured.get(oid)
+                if raw_value is None:
+                    continue
+
+                match_result = output_proc.match_model_field(oid, raw_value, model_name)
+                if not match_result.matches:
+                    continue
+
+                # Show raw value + top matches with bars
+                raw_str = _format_structured_cell(raw_value)
+                st.markdown(f"**{label}** · 模型输出：`{html.escape(raw_str[:120])}`")
+
+                bars_html = ""
+                max_sim = max(m.similarity for m in match_result.matches) or 1.0
+                for m in match_result.matches[:6]:
+                    pct = m.similarity / max_sim if max_sim > 0 else 0
+                    bar_color = "#0EA5E9" if m.is_above_threshold else "#94A3B8"
+                    border = ""
+                    if m in match_result.selected_matches:
+                        border = "border: 2px solid #0EA5E9;"
+                        bar_color = "#0284C7"
+                    bars_html += f"""
+                    <div style="display:flex;align-items:center;margin:2px 0;font-size:0.82rem;{border}">
+                        <span style="width:220px;text-align:right;padding-right:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{html.escape(m.option)}</span>
+                        <div style="flex:1;background:#F1F5F9;border-radius:4px;height:18px;margin:0 8px;">
+                            <div style="background:{bar_color};width:{pct*100:.0f}%;height:100%;border-radius:4px;"></div>
+                        </div>
+                        <span style="width:55px;text-align:right;">{m.similarity:.3f}</span>
+                    </div>"""
+                st.markdown(bars_html, unsafe_allow_html=True)
+                st.caption("")  # spacing
+
+
+# ══════════════════════════════════════════════════════════════════
 #  Step 4 — BERT 案件语义画像
 # ══════════════════════════════════════════════════════════════════
 
@@ -1239,6 +1299,13 @@ def main() -> None:
             render_step_header(5, "结构化七维度对比", "七个维度 × 各模型的原始结构化判断")
             with st.expander("查看七维度结构化判断对比", expanded=True):
                 render_structured_comparison(results)
+
+            # BERT matching visualization
+            if _BERT_AVAILABLE:
+                st.divider()
+                render_step_header("5a", "BERT 语义匹配过程", "展示 BERT 如何将每个模型的自然语言输出映射到标准闭集选项")
+                with st.expander("🔍 展开查看 BERT 匹配详情", expanded=False):
+                    render_bert_matching_visualization(results)
 
             # Step 6: Normalization
             st.divider()
