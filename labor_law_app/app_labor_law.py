@@ -688,7 +688,11 @@ def render_structured_comparison(results: dict[str, Any]) -> None:
         for model_name in present_models:
             val = values[model_name]
             if has_disagreement and val and val != "未返回":
-                row[model_ui_name(model_name)] = f"<strong><em>{html.escape(val)}</em></strong>"
+                row[model_ui_name(model_name)] = (
+                    f'<span style="background:#FEE2E2;color:#991B1B;font-weight:700;'
+                    f'font-style:italic;padding:2px 4px;border-radius:3px;">'
+                    f'{html.escape(val)}</span>'
+                )
             else:
                 row[model_ui_name(model_name)] = html.escape(val)
         rows.append(row)
@@ -706,7 +710,9 @@ def render_structured_comparison(results: dict[str, Any]) -> None:
             <tbody>{''.join(body_rows)}</tbody>
         </table>
     </div>
-    <div class="small-caption" style="margin-top: 0.3rem;"><strong><em>加粗斜体</em></strong> = 各模型判断不一致，需重点关注</div>
+    <div class="small-caption" style="margin-top: 0.4rem;">
+        <span style="background:#FEE2E2;color:#991B1B;font-weight:700;font-style:italic;padding:1px 4px;border-radius:3px;">红底加粗斜体</span> = 各模型判断不一致，存在分歧，需重点关注
+    </div>
     """, unsafe_allow_html=True)
 
 
