@@ -1001,60 +1001,9 @@ def render_truthfinder() -> None:
     st.markdown("#### 七个维度的聚合可信结果")
     render_light_table(summary_rows, ["维度", "聚合可信结果", "置信度", "候选数"])
 
-    # Detail per object
-    with st.expander("查看候选 fact 置信度明细", expanded=False):
-        for row in truth_rows:
-            st.markdown(f"**{OBJECT_LABELS.get(row.get('object_id', ''), row.get('object_id', ''))}**")
-            cand_rows = []
-            for c in (row.get("candidates", []) or []):
-                support_by = c.get("support_by_model", {}) or {}
-                support_str = " · ".join(
-                    f"{model_ui_name(m)}:{float(w):.3f}"
-                    for m, w in support_by.items() if float(w) > 0
-                ) or "(空)"
-                cand_rows.append({
-                    "排名": c.get("rank"),
-                    "事实": c.get("fact"),
-                    "置信度": f"{float(c.get('confidence', 0)):.4f}",
-                    "选中": "✅" if c.get("is_selected") else "",
-                    "支持模型": support_str,
-                })
-            render_light_table(cand_rows, ["排名", "事实", "置信度", "选中", "支持模型"])
-
     # Debug
     with st.expander("查看 TruthFinder debug 信息", expanded=False):
         _render_json_block(debug_info)
-
-    # BERT report (divergence + confidence)
-    if _BERT_AVAILABLE:
-        try:
-            report_gen = BERTReportGenerator()
-            divergences = report_gen.compute_divergence(truth_rows, t_score)
-            confidences = report_gen.compute_confidence(truth_rows, t_score)
-
-            div_rows = []
-            for oid, d in divergences.items():
-                div_rows.append({
-                    "维度": OBJECT_LABELS.get(oid, oid),
-                    "分歧度": d.divergence_level,
-                    "模型一致性": f"{d.inter_model_agreement_rate:.2%}",
-                    "解读": d.interpretation,
-                })
-            st.markdown("#### BERT 分歧度分析")
-            render_light_table(div_rows, ["维度", "分歧度", "模型一致性", "解读"])
-
-            conf_rows = []
-            for oid, c in confidences.items():
-                conf_rows.append({
-                    "维度": OBJECT_LABELS.get(oid, oid),
-                    "置信度": c.confidence_level,
-                    "综合得分": f"{c.overall_confidence:.3f}",
-                    "注意事项": "；".join(c.caveats) if c.caveats else "无",
-                })
-            st.markdown("#### BERT 置信度分析")
-            render_light_table(conf_rows, ["维度", "置信度", "综合得分", "注意事项"])
-        except Exception as e:
-            st.warning(f"BERT 报告生成失败: {e}")
 
 
 # ══════════════════════════════════════════════════════════════════
