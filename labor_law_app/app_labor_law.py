@@ -418,11 +418,59 @@ def parse_labor_model_output(raw_output: str) -> dict[str, Any]:
     }
 
 
+def _render_single_model_bert_match(model_name: str, parsed_payload: dict[str, Any]) -> None:
+    """Render compact BERT matching bars for one model right after it finishes."""
+    if not _BERT_AVAILABLE:
+        return
+    structured = (parsed_payload or {}).get("structured_analysis", {}) or {}
+    if not structured:
+        return
+
+    bert = BERTProcessor.get_instance()
+    if not bert.is_loaded:
+        bert._ensure_loaded()
+    output_proc = BERTOutputProcessor(bert)
+
+    st.markdown(f"#### 🔎 BERT 实时语义匹配：{model_ui_name(model_name)}")
+
+    for item in LABOR_OBJECTS:
+        oid = item["object_id"]
+        label = item["label"]
+        raw_value = structured.get(oid)
+        if raw_value is None:
+            continue
+
+        match_result = output_proc.match_model_field(oid, raw_value, model_name)
+        matches = getattr(match_result, "matches", []) or []
+        if not matches:
+            continue
+
+        raw_str = _format_structured_cell(raw_value)
+        st.caption(f"{label}  ← 模型输出：`{html.escape(raw_str[:100])}`")
+
+        max_sim = max(m.similarity for m in matches) if matches else 1.0
+        bars_html = ""
+        for m in matches[:5]:
+            pct = m.similarity / max_sim if max_sim > 0 else 0
+            is_selected = any(s.option == m.option for s in (getattr(match_result, "selected_matches", []) or []))
+            bar_color = "#0284C7" if is_selected else ("#0EA5E9" if m.is_above_threshold else "#CBD5E1")
+            bars_html += f"""
+            <div style="display:flex;align-items:center;margin:1px 0;font-size:0.78rem;">
+                <span style="width:200px;text-align:right;padding-right:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{html.escape(m.option)}</span>
+                <div style="flex:1;background:#F1F5F9;border-radius:3px;height:14px;margin:0 6px;">
+                    <div style="background:{bar_color};width:{pct*100:.0f}%;height:100%;border-radius:3px;"></div>
+                </div>
+                <span style="width:48px;text-align:right;font-size:0.75rem;">{m.similarity:.3f}</span>
+            </div>"""
+        st.markdown(bars_html, unsafe_allow_html=True)
+
+    st.markdown("---")
+
+
 def run_model_pipeline(case_text: str, selected_models: List[str]) -> None:
     reset_labor_state()
     st.session_state["labor_case_text"] = case_text
 
-    # Use v2 prompt if BERT available, otherwise use legacy
     if _BERT_AVAILABLE:
         prompt = build_labor_prompt_v2(case_text)
     else:
@@ -457,6 +505,10 @@ def run_model_pipeline(case_text: str, selected_models: List[str]) -> None:
             }
         times[model_name] = time.time() - start
         progress.progress(idx / len(selected_models))
+
+        # Show BERT matching immediately after each model completes
+        if results[model_name].get("ok") and _BERT_AVAILABLE:
+            _render_single_model_bert_match(model_name, results[model_name])
 
     st.session_state["labor_model_running"] = ""
     st.session_state["labor_results"] = results
