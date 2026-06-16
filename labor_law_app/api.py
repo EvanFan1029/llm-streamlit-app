@@ -52,6 +52,7 @@ def get_api_schema() -> dict[str, Any]:
                             "issue_keyword": "重点解析关键词，multi",
                             "article_reference": "重点法条方向，multi",
                             "adjudication_tendency": "裁判/处理倾向初筛，single",
+                            "background": "重要背景信息，multi",
                         },
                     }
                 },
@@ -94,8 +95,13 @@ def build_labor_prompt(case_text: str) -> str:
 3. structured_analysis 的字段值必须尽量从候选集合中选择。
 4. article_reference 只放需要重点检索的法条标签。
 5. 重点解释哪些事实可能有问题，以及对应哪些法条。
+6. 严格基于用户原始案情文本，不得补写未出现的事实。
+7. 不得根据性别推断孕期、产期、哺乳期。仅出现"女性、女员工、女士、她"只能确认性别。
+8. 不得根据"有孩子、已婚、母亲、宝妈、接送孩子"推断哺乳期。
+9. 特殊身份背景必须有原文明确依据，若无明确触发词 background 必须选"无特殊背景信息"。
+10. 证据不足时输出"证据不足/需补充材料"，不得自行脑补证据。
 
-六个 object 与候选集合如下：
+七个 object 与候选集合如下：
 
 {object_text}
 
@@ -108,7 +114,8 @@ def build_labor_prompt(case_text: str) -> str:
     "key_fact": ["可以多个"],
     "issue_keyword": ["可以多个"],
     "article_reference": ["可以多个"],
-    "adjudication_tendency": "只能选一个"
+    "adjudication_tendency": "只能选一个",
+    "background": ["可以多个"]
   }},
   "issue_analysis": [
     {{

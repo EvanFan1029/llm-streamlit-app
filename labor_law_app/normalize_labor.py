@@ -1094,6 +1094,22 @@ def normalize_model_labor_output(
         row["final_normalized_facts"] = final_facts
         row["normalized_facts"] = final_facts
 
+    # Grounding Guard: filter unsupported facts
+    grounding_warnings: list[dict[str, Any]] = []
+    try:
+        from labor_law_app.grounding_guard import filter_unsupported_facts
+        filtered_normalized, grounding_warnings = filter_unsupported_facts(
+            normalized,
+            user_text or "",
+            source_name="normalize",
+        )
+        normalized = filtered_normalized
+        for row in rows:
+            row["final_normalized_facts"] = list(normalized.get(row["object_id"], []))
+            row["normalized_facts"] = list(normalized.get(row["object_id"], []))
+    except ImportError:
+        pass
+
     return {
         "case_summary": case_summary,
         "raw_structured_analysis": raw_structured_analysis,
@@ -1106,6 +1122,7 @@ def normalize_model_labor_output(
             "derived_article_refs": {"article_reference": _infer_articles_from_keywords(normalized.get("issue_keyword", []))},
         },
         "warnings": _dedupe_keep_order(warnings),
+        "grounding_warnings": grounding_warnings,
     }
 
 

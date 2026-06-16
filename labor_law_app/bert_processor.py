@@ -35,6 +35,7 @@ class BERTProcessor:
             raise RuntimeError("Use BERTProcessor.get_instance() instead")
         self._cfg = config or BERTConfig()
         self._model = None
+        self.embedding_dim: int = 0
         self._option_cache: Dict[str, Dict[str, np.ndarray]] = {}
         self._text_cache: Dict[str, np.ndarray] = {}
 
@@ -67,6 +68,10 @@ class BERTProcessor:
             self._cfg.model_name,
             device=self._cfg.device,
         )
+        try:
+            self.embedding_dim = self._model.get_sentence_embedding_dimension() or 512
+        except AttributeError:
+            self.embedding_dim = self._model.get_embedding_dimension() or 512
         if self._cfg.normalize_embeddings:
             self._model.encode = self._make_normalized_encode(self._model)
 
@@ -85,7 +90,7 @@ class BERTProcessor:
     def embed_texts(self, texts: List[str]) -> np.ndarray:
         self._ensure_loaded()
         if not texts:
-            return np.empty((0, 1024), dtype=np.float32)
+            return np.empty((0, self.embedding_dim), dtype=np.float32)
         cached: List[Optional[np.ndarray]] = []
         uncached_indices: List[int] = []
         uncached_texts: List[str] = []

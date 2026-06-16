@@ -36,7 +36,7 @@
 
 ## 标准 object / fact
 
-API 会把自然语言和模型输出统一归一化到六个 object：
+API 会把自然语言和模型输出统一归一化到七个 object：
 
 | object | 含义 | 类型 |
 |---|---|---|
@@ -46,6 +46,7 @@ API 会把自然语言和模型输出统一归一化到六个 object：
 | `issue_keyword` | 重点解析关键词：双倍工资、违法解除、仲裁时效等 | multi |
 | `article_reference` | 重点法条方向：劳动合同法、劳动法、民法典等具体条文 | multi |
 | `adjudication_tendency` | 裁判/处理倾向初筛 | single |
+| `background` | 重要背景信息：三期女职工、工伤、高管、劳务派遣等 | multi |
 
 ## API 调用
 

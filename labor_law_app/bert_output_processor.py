@@ -40,7 +40,7 @@ DEFAULT_THRESHOLDS: Dict[str, float] = {
     "issue_keyword": 0.40,
     "article_reference": 0.50,
     "adjudication_tendency": 0.50,
-    "background": 0.40,
+    "background": 0.55,
 }
 
 DEFAULT_SINGLE_MARGIN = 0.08

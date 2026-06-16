@@ -3,10 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List
 
-from labor_law_app.normalize_labor import BACKGROUND_OPTIONS, get_labor_objects
+from labor_law_app.normalize_labor import BACKGROUND_OPTIONS, LABOR_OBJECTS, get_labor_objects
 
 
 _LABOR_OBJECTS_META = get_labor_objects()
+
+# ── v1 (legacy) prompt kept for backward compatibility ──
 
 UNIFIED_SYSTEM_PROMPT = """你是一位精通中国劳动法和相关司法实践的律师助理。
 
@@ -60,6 +62,88 @@ def build_labor_prompt(case_text: str, profile_hint: str = "") -> str:
     parts.append("")
     parts.append("请按照上述格式输出 JSON 分析结果。")
     return "\n".join(parts)
+
+
+# ────────────────────────────────────────────────────────────
+#  v2 — 对齐 medical_app 的严格结构化 prompt 模板
+# ────────────────────────────────────────────────────────────
+
+LABOR_LAW_SYSTEM_PROMPT = """你是一位谨慎、可靠的劳动法律师助理。你不能出具正式法律意见书，不能代替执业律师，不能对案件结果做出保证。
+
+请只输出合法 JSON，不要输出 Markdown，不要输出代码块，不要输出解释性前缀。"""
+
+
+def build_labor_object_blocks() -> str:
+    """Build per-object option blocks for the prompt, similar to build_medical_prompt."""
+    blocks = []
+    for schema in LABOR_OBJECTS:
+        options = "\n".join(f"  - {opt}" for opt in schema.options)
+        plural_hint = "可以多个" if schema.mode == "multi" else "只能选一个"
+        fallback = schema.fallback[0] if schema.fallback else "无"
+        blocks.append(
+            f"{schema.object_id}（{schema.label}，{plural_hint}，默认值: {fallback}）:\n{options}"
+        )
+    return "\n\n".join(blocks)
+
+
+def build_labor_prompt_v2(case_text: str, profile_hint: str = "") -> str:
+    """Build a strict structured prompt for labor law LLM analysis.
+
+    Guides each LLM to output:
+      1. user_explanation — natural-language advice for the consulter
+      2. structured_analysis — 7-object structured judgment using canonical options
+    """
+    object_blocks = build_labor_object_blocks()
+
+    prompt = f"""你是一个谨慎、可靠的劳动法律师助理。你不能出具正式法律意见书，不能代替执业律师，不能对案件结果做出保证。
+
+请只输出合法 JSON，不要输出 Markdown，不要输出代码块，不要输出解释性前缀。
+
+请根据用户提供的劳动争议案件描述，输出：
+1. user_explanation：给咨询者看的自然语言法律初步分析；
+2. structured_analysis：七个维度下的结构化判断。
+
+严格要求：
+1. 不能出具正式法律意见书。
+2. 不能说"一定赢""肯定胜诉"。
+3. 条件性提醒不能覆盖当前事实的紧急程度。
+4. 如果证据不足，应明确指出缺失哪些材料。
+5. structured_analysis 不要输出长句，尽量直接从候选集合中选。
+6. 严格基于用户原始案情文本，不得补写未出现的事实。
+7. 不得根据性别推断孕期、产期、哺乳期。仅出现"女性、女员工、女士、她"只能确认性别，不得推断三期女职工。
+8. 不得根据"有孩子、已婚、母亲、宝妈、接送孩子"推断哺乳期。
+9. 特殊身份背景必须有原文明确触发词（如怀孕、孕期、产假、哺乳期、工伤、高管、劳务派遣等），若无则 background 必须是"无特殊背景信息"。
+10. 证据不足时输出"证据不足/需补充材料"，不得自行脑补证据。
+6. user_explanation 可以自然语言表达，但必须谨慎、清楚，不过度承诺。
+7. single 维度只能输出一个候选值（字符串）。
+8. multi 维度只能输出候选集合中的若干值（数组）。
+9. 必须覆盖全部七个维度，不能遗漏。
+10. 注意劳动争议调解仲裁法第 27 条关于仲裁时效的规定（一般为一年）。
+
+七个维度与候选集合如下：
+
+{object_blocks}
+
+输出 JSON 格式必须严格如下：
+{{{{
+  "user_explanation": "给咨询者看的自然语言法律初步分析",
+  "structured_analysis": {{{{
+    "relationship_type": "只能从候选集合中选择一个",
+    "dispute_focus": ["只能从候选集合中选择，可以多个"],
+    "key_fact": ["只能从候选集合中选择，可以多个"],
+    "issue_keyword": ["只能从候选集合中选择，可以多个"],
+    "article_reference": ["只能从候选集合中选择，可以多个"],
+    "adjudication_tendency": "只能从候选集合中选择一个",
+    "background": ["只能从候选集合中选择，可以多个"]
+  }}}}
+}}}}
+
+{ '## 案件背景提示' + chr(10) + profile_hint if profile_hint else '' }
+
+用户案件描述：
+\"\"\"{case_text.strip()}\"\"\""""
+
+    return prompt.strip()
 
 
 def build_profile_hint(profile: "CaseSemanticProfile") -> str:

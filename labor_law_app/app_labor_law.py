@@ -863,9 +863,21 @@ def render_normalization() -> None:
                     "structured_analysis": payload.get("structured_analysis", {}),
                 }
 
+            bert = None
+            if _BERT_AVAILABLE:
+                try:
+                    from labor_law_app.bert_processor import BERTProcessor
+                    p = BERTProcessor.get_instance()
+                    if p.is_loaded or True:
+                        p._ensure_loaded()
+                        bert = p
+                except Exception:
+                    pass
+
             normalized_all = normalize_all_models_labor_outputs(
                 model_outputs,
                 user_text=case_text,
+                bert_processor=bert,
             )
             st.session_state["labor_normalized_all"] = normalized_all
             st.session_state["labor_error"] = ""
@@ -1414,6 +1426,36 @@ def main() -> None:
                         st.json(lawyer_brief)
                 except Exception as e:
                     st.error(f"规则基线分析失败: {e}")
+
+    # Grounding Guard display (between normalization and TruthFinder)
+    normalized_all = st.session_state.get("labor_normalized_all") or {}
+    all_warnings: list[dict] = []
+    for model_name, norm_result in normalized_all.items():
+        gw = (norm_result or {}).get("grounding_warnings", []) or []
+        all_warnings.extend(gw)
+
+    if all_warnings:
+        st.divider()
+        render_step_header("6a", "事实依据校验 / Grounding Guard",
+                          f"检测到 {len(all_warnings)} 条无原文依据的敏感事实，已从 TruthFinder 输入中移除")
+        gw_rows = []
+        for w in all_warnings:
+            gw_rows.append({
+                "来源": w.get("source", ""),
+                "维度": OBJECT_LABELS.get(w.get("object_id", ""), w.get("object_id", "")),
+                "被过滤事实": w.get("fact", ""),
+                "原因": w.get("reason", ""),
+                "操作": w.get("action", ""),
+            })
+        render_light_table(gw_rows, ["来源", "维度", "被过滤事实", "原因", "操作"])
+    elif normalized_all:
+        st.divider()
+        render_step_header("6a", "事实依据校验 / Grounding Guard",
+                          "未检测到明显无原文依据的敏感事实")
+        st.success("✅ Grounding Guard 检查通过：归一化结果中未发现无原文依据的敏感事实。")
+
+    normalized_mode = "BERT 增强归一化 + Grounding Guard" if _BERT_AVAILABLE else "规则归一化 + Grounding Guard"
+    st.caption(f"当前归一化模式：{normalized_mode}")
 
     # Step 7: TruthFinder
     if st.session_state.get("labor_normalized_all"):
