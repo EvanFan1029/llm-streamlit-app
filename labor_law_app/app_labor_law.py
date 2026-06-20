@@ -1147,6 +1147,51 @@ def build_final_labor_report() -> str:
     return "\n".join(lines)
 
 
+def _format_report_as_natural_language(report: Any) -> str:
+    """将 BERTReportGenerator 的报告对象转为可朗读的自然语言。"""
+    d = report.to_dict() if hasattr(report, 'to_dict') else (report or {})
+    lines = []
+    lines.append("## 案件综合分析报告")
+    lines.append("")
+    lines.append(f"**法律关系认定**：{d.get('relationship_assessment', '未确定')}")
+    lines.append(f"**裁判倾向预判**：{d.get('overall_tendency', '未确定')}")
+    lines.append(f"**整体分歧度**：{d.get('overall_divergence', '未计算')} ｜ **整体置信度**：{d.get('overall_confidence', '未计算')}")
+    lines.append("")
+    core_issues = d.get('core_legal_issues', []) or []
+    if core_issues:
+        lines.append("**核心法律问题**：")
+        for issue in core_issues:
+            lines.append(f"- {issue}")
+    lines.append("")
+    model_rank = d.get('model_trust_ranking', []) or []
+    if len(model_rank) > 1:
+        lines.append(f"**多模型可信度分析**：共 {len(model_rank)} 个模型参与聚合。")
+        for r in model_rank:
+            lines.append(f"- {model_ui_name(r['model'])}：可信度 {r['trust_score']}")
+        lines.append("")
+    articles = d.get('article_recommendations', []) or []
+    if articles:
+        lines.append("**重点法条方向**：")
+        for a in articles[:8]:
+            label = a.get('label', a.get('article', ''))
+            lines.append(f"- {label}")
+    lines.append("")
+    gaps = d.get('evidence_gaps', []) or []
+    if gaps:
+        lines.append("**证据缺口**：")
+        for g in gaps:
+            lines.append(f"- ⚠️ {g}")
+    lines.append("")
+    actions = d.get('recommended_actions', []) or []
+    if actions:
+        lines.append("**后续建议**：")
+        for a in actions:
+            lines.append(f"- {a}")
+    lines.append("")
+    lines.append(f"> {d.get('disclaimer', '本报告不构成正式法律意见。')}")
+    return "\n".join(lines)
+
+
 def render_final_report() -> None:
     if not st.session_state.get("labor_truthfinder_payload"):
         st.info("请先完成 真值发现算法 聚合。")
@@ -1164,7 +1209,9 @@ def render_final_report() -> None:
                 t_score=tf_payload.get("t_score", {}),
             )
             st.session_state["labor_final_report"] = report
-            st.json(report.to_dict())
+            # Show as natural language, not raw JSON
+            report_text = _format_report_as_natural_language(report)
+            st.markdown(report_text)
             return
         except Exception as e:
             st.warning(f"BERT 综合报告生成失败，回退至模板报告: {e}")
@@ -1380,17 +1427,34 @@ def main() -> None:
             render_step_header(3, "四模型分析结果", "优先展示 user_explanation 自然语言分析，可展开查看结构化 JSON")
             render_model_explanations(results, times or {})
 
-            # Step 4: BERT profile
+            # Step 4: BERT profile + matching + comparison (merged)
             if _BERT_AVAILABLE:
                 st.divider()
-                render_step_header(4, "BERT 案件语义画像", "基于 BERT 锚定法提取的 5 维语义特征")
+                render_step_header(4, "BERT 语义对齐与模型对比", "BERT 画像 + 语义匹配 + 七维对比")
+                st.markdown("""
+                <div class="soft-card" style="font-size:0.9rem; line-height:1.6;">
+                <strong>本步目的</strong>：BERT 将四个模型的不同措辞统一到标准法律选项，然后并排对比找出分歧。<br>
+                <strong>什么是 BERT</strong>：全称 基于Transformer的双向编码器表征模型（Bidirectional Encoder Representations from Transformers，简称 BERT）。
+                其中 Transformer 是 2017 年由 Google 提出的深度学习架构，核心机制是"自注意力"——让模型同时关注句子中所有词之间的关系。
+                BERT 在大规模中文语料上预训练后学会了理解中文语义。本项目使用 bge-small-zh-v1.5（24MB），本地 CPU 运行。<br>
+                <strong>在这里做什么</strong>：输入端 — 分析案件文本提取 5 个语义维度特征；输出端 — 将 LLM 自由表述对齐到 67 个标准法律选项。<br>
+                <strong>为什么需要</strong>：模型有的写"没签合同"有的写"未订立书面劳动合同"，不用 BERT 做语义对齐，真值发现算法会当成不同 fact。
+                </div>
+                """, unsafe_allow_html=True)
                 render_bert_profile()
+                st.markdown("""
+                <div class="soft-card" style="font-size:0.9rem; line-height:1.6;">
+                <strong>语义轴解读</strong>：劳动关系信号 >0.6 倾向劳动关系，<0.4 倾向劳务/承揽；
+                证据充分性越低越需补充证据；雇主违法程度和法定违规可能越高违法可能性越大；诉求强度越高劳动者法律依据越充分。
+                </div>
+                """, unsafe_allow_html=True)
 
-            # Step 5: Structured comparison
-            st.divider()
-            render_step_header(5, "结构化七维度对比", "七个维度 × 各模型的原始结构化判断")
-            with st.expander("查看七维度结构化判断对比", expanded=True):
+            # Merged into Step 4: structured comparison with BERT matching
+            with st.expander("查看七维度结构化判断对比（分歧加粗标注）", expanded=True):
                 render_structured_comparison(results)
+            if _BERT_AVAILABLE:
+                with st.expander("查看 BERT 语义匹配详情（相似度条形图）", expanded=False):
+                    render_bert_matching_visualization(results)
 
             # BERT matching visualization
             if _BERT_AVAILABLE:
@@ -1464,33 +1528,64 @@ def main() -> None:
         gw = (norm_result or {}).get("grounding_warnings", []) or []
         all_warnings.extend(gw)
 
-    if all_warnings:
-        st.divider()
-        render_step_header("6a", "事实依据校验 / 事实依据校验",
-                          f"检测到 {len(all_warnings)} 条无原文依据的敏感事实，已从 真值发现算法 输入中移除")
-        gw_rows = []
-        for w in all_warnings:
-            gw_rows.append({
-                "来源": w.get("source", ""),
-                "维度": OBJECT_LABELS.get(w.get("object_id", ""), w.get("object_id", "")),
-                "被过滤事实": w.get("fact", ""),
-                "原因": w.get("reason", ""),
-                "操作": w.get("action", ""),
-            })
-        render_light_table(gw_rows, ["来源", "维度", "被过滤事实", "原因", "操作"])
-    elif normalized_all:
-        st.divider()
-        render_step_header("6a", "事实依据校验 / 事实依据校验",
-                          "未检测到明显无原文依据的敏感事实")
-        st.success("✅ 事实依据校验 检查通过：归一化结果中未发现无原文依据的敏感事实。")
+    st.divider()
+    render_step_header("6a", "事实依据校验",
+                      "检查归一化结果中是否存在无原文依据的敏感事实——防止模型把"女性"推测为"三期女职工"")
+    st.markdown("""
+    <div class="soft-card" style="font-size:0.9rem; line-height:1.6;">
+    <strong>本步目的</strong>：进入真值发现算法聚合前，最后一次检查——模型输出的每个 fact 在原文中有没有依据？<br>
+    <strong>工作原理</strong>：敏感事实（如"三期女职工""工伤""高管""劳务派遣"）必须有原文明确触发词才能保留。
+    例如"孕期/产假/怀孕"才能触发三期女职工，仅凭"女性""母亲""有孩子"一律拦截。<br>
+    <strong>为什么需要</strong>：本地 7B 小模型偶尔会产生幻觉——看到"女性"就输出"孕期女职工"。
+    这步用确定性规则（而非模型判断）在数据入口处拦截，不依赖模型自查。
+    </div>
+    """, unsafe_allow_html=True)
 
-    normalized_mode = "BERT 增强归一化 + 事实依据校验" if _BERT_AVAILABLE else "规则归一化 + 事实依据校验"
+    # Per-model audit cards
+    for model_name in MODELS:
+        norm_result = (normalized_all or {}).get(model_name, {}) or {}
+        norm_data = norm_result.get("normalized", {}) or {}
+        warnings_for_model = norm_result.get("grounding_warnings", []) or []
+        if not norm_data:
+            continue
+
+        # Build audit results per fact
+        audit_html = f'<div class="soft-card"><strong>🔍 {html.escape(model_ui_name(model_name))} 事实审核</strong><br><br>'
+        for oid, facts in norm_data.items():
+            for fact in (facts or []):
+                removed = any(
+                    w.get("fact") == fact and w.get("source") == "normalize"
+                    for w in warnings_for_model
+                )
+                if removed:
+                    reason = next((w.get("reason", "") for w in warnings_for_model if w.get("fact") == fact), "")
+                    audit_html += f'<span style="color:#DC2626;">❌ "{html.escape(fact)}" — 已拦截</span><br>'
+                    audit_html += f'<span style="color:#6B7280;font-size:0.82rem;">&nbsp;&nbsp;▸ 原因：{html.escape(reason)}</span><br>'
+                else:
+                    audit_html += f'<span style="color:#16A34A;">✅ "{html.escape(fact)}" — 通过</span><br>'
+        audit_html += '</div>'
+        st.markdown(audit_html, unsafe_allow_html=True)
+
+    if not any(norm_result.get("grounding_warnings") for norm_result in (normalized_all or {}).values() if isinstance(norm_result, dict)):
+        st.success("✅ 全部通过：未检测到无原文依据的敏感事实。")
+
+    normalized_mode = "BERT增强归一化 + 事实依据校验" if _BERT_AVAILABLE else "规则归一化 + 事实依据校验"
     st.caption(f"当前归一化模式：{normalized_mode}")
 
     # Step 7: 真值发现算法
     if st.session_state.get("labor_normalized_all"):
         st.divider()
         render_step_header(7, "真值发现算法可信聚合", "多模型交叉验证，迭代置信度传播")
+        st.markdown("""
+        <div class="soft-card" style="font-size:0.9rem; line-height:1.6;">
+        <strong>本步目的</strong>：对四个模型的结构化判断进行交叉验证。把"我相信哪个模型"变成"数据告诉我哪个更可信"。<br>
+        <strong>逻辑链</strong>：经过事实依据校验过滤的事实进入真值发现算法 → 迭代计算每个模型的信任度和每个 fact 的置信度 → 高信任度模型支持的 fact 获得更高置信度。<br>
+        <strong>关于置信度</strong>：置信度衡量多模型聚合结果的可信程度（0-1），它不是法律正确性的保证，而是"模型之间有多大共识"的指标。<br>
+        阈值参考：≥0.55 为高置信度（模型高度一致），0.35-0.55 为中等，<0.35 为低置信度。<br>
+        影响因素：支持该结论的模型数量、模型的信任度得分、迭代过程的收敛稳定性。<br>
+        注意：即使置信度高，也必须结合事实依据校验的原文依据复核。
+        </div>
+        """, unsafe_allow_html=True)
         render_truthfinder()
 
     # Step 8: Final report
