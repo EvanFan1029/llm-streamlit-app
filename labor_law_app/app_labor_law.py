@@ -191,7 +191,7 @@ def render_header() -> None:
     """, unsafe_allow_html=True)
 
 
-def render_step_header(step_no: int, title: str, caption: str = "") -> None:
+def render_step_header(step_no: int | str, title: str, caption: str = "") -> None:
     caption_html = f'<div class="small-caption" style="margin-top: 0.2rem;">{html.escape(caption)}</div>' if caption else ""
     st.markdown(f"""
     <div class="section-card">
@@ -1530,7 +1530,7 @@ def main() -> None:
 
     st.divider()
     render_step_header("6a", "事实依据校验",
-                      "检查归一化结果中是否存在无原文依据的敏感事实——防止模型把"女性"推测为"三期女职工"")
+                      '检查归一化结果中是否存在无原文依据的敏感事实——防止模型把「女性」推测为「三期女职工」')
     st.markdown("""
     <div class="soft-card" style="font-size:0.9rem; line-height:1.6;">
     <strong>本步目的</strong>：进入真值发现算法聚合前，最后一次检查——模型输出的每个 fact 在原文中有没有依据？<br>
