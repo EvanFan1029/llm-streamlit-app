@@ -58,7 +58,7 @@ except ImportError:
     pass
 
 st.set_page_config(
-    page_title="劳动法 TruthFinder 可信聚合系统",
+    page_title="劳动法 真值发现算法可信聚合系统",
     page_icon="⚖️",
     layout="wide",
 )
@@ -185,8 +185,8 @@ def model_ui_name(model_name: str) -> str:
 def render_header() -> None:
     st.markdown("""
     <div class="hero-card">
-        <h1>⚖️ 劳动法场景多模型 TruthFinder 可信聚合系统</h1>
-        <p>输入劳动争议案件描述 → 四模型结构化分析 → BERT 语义对齐 → TruthFinder 可信聚合 → 律师综合报告</p>
+        <h1>⚖️ 劳动法场景多模型 真值发现算法可信聚合系统</h1>
+        <p>输入劳动争议案件描述 → 四模型结构化分析 → BERT 语义对齐 → 真值发现算法可信聚合 → 律师综合报告</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -223,7 +223,7 @@ def render_labor_disclaimer() -> None:
     <div class="disclaimer-card">
         <h4>⚖️ 法律免责声明</h4>
         <p>
-            本系统为律师办案辅助工具，通过多模型 TruthFinder 可信聚合算法提供参考分析。<br/>
+            本系统为律师办案辅助工具，通过多模型 真值发现算法可信聚合算法提供参考分析。<br/>
             不构成正式法律意见、裁判预测或对案件结果的保证。法律判断请以执业律师结合全部案件材料后的专业意见为准。<br/>
             引用法条请以国家法律法规数据库公布的最新有效文本为准。
         </p>
@@ -283,7 +283,7 @@ def render_flow_status() -> None:
             {_badge_html("四模型调用", model_status)}
             {_badge_html("BERT画像", bert_status)}
             {_badge_html("归一化", norm_status)}
-            {_badge_html("TruthFinder", tf_status)}
+            {_badge_html("真值发现算法", tf_status)}
             {_badge_html("ZK证明", zk_status)}
         </div>
     </div>
@@ -369,14 +369,44 @@ def _render_json_block(data: Any) -> None:
 #  Ollama 调用
 # ══════════════════════════════════════════════════════════════════
 
-def call_ollama_labor(model: str, prompt: str, timeout: int = 300) -> str:
+def call_ollama_labor_stream(model: str, prompt: str, label: str, timeout: int = 300) -> str:
+    """ChatGPT 风格流式输出——文字逐字出现。"""
     payload = {
         "model": model,
         "messages": [
-            {
-                "role": "system",
-                "content": "你是一位谨慎、可靠的劳动法律师助理。你不能出具正式法律意见书，不能代替执业律师，不能对案件结果做出保证。",
-            },
+            {"role": "system", "content": "你是一位谨慎、可靠的劳动法律师助理。"},
+            {"role": "user", "content": prompt},
+        ],
+        "stream": True,
+        "options": {"temperature": 0, "top_p": 0.9, "num_predict": 1536},
+    }
+    placeholder = st.empty()
+    full_text = ""
+    try:
+        response = requests.post(OLLAMA_URL, json=payload, timeout=timeout, stream=True)
+        response.raise_for_status()
+        for line in response.iter_lines(decode_unicode=True):
+            if not line:
+                continue
+            try:
+                chunk = json.loads(line)
+                content = (chunk.get("message", {}) or {}).get("content", "")
+                if content:
+                    full_text += content
+                    placeholder.markdown(full_text)
+            except json.JSONDecodeError:
+                continue
+        return full_text.strip()
+    except Exception as e:
+        return f"[ERROR] {label}: {e}"
+
+
+def call_ollama_labor(model: str, prompt: str, timeout: int = 300) -> str:
+    """非流式备用。"""
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "你是一位谨慎、可靠的劳动法律师助理。"},
             {"role": "user", "content": prompt},
         ],
         "stream": False,
@@ -524,7 +554,7 @@ def run_model_pipeline(case_text: str, selected_models: List[str]) -> None:
         status.info(f"正在调用 {model_ui_name(model_name)} ({idx}/{len(selected_models)})")
         start = time.time()
         try:
-            raw_output = call_ollama_labor(model_name, prompt)
+            raw_output = call_ollama_labor_stream(model_name, prompt, model_ui_name(model_name))
             parsed_payload = parse_labor_model_output(raw_output)
             if not parsed_payload.get("ok"):
                 error_count += 1
@@ -724,7 +754,7 @@ def render_structured_comparison(results: dict[str, Any]) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════
-#  BERT 匹配过程可视化
+#  BERT 语义对齐过程可视化
 # ══════════════════════════════════════════════════════════════════
 
 def render_bert_matching_visualization(results: dict[str, Any]) -> None:
@@ -897,7 +927,7 @@ def render_normalization() -> None:
             <strong>三层区分：</strong> user_explanation 是模型给用户的自然语言分析；
             structured_analysis 是模型原始结构化回答；
             normalized 是前端展示用归一化结果；
-            TruthFinder 默认输入来自 from_model_fields + exclude_fallbacks=True。
+            真值发现算法 默认输入来自 from_model_fields + exclude_fallbacks=True。
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -909,7 +939,7 @@ def render_normalization() -> None:
     tf_input_table = build_labor_fact_table(
         normalized_all, source="from_model_fields", exclude_fallbacks=True,
     )
-    with st.expander("查看 TruthFinder 输入预览（from_model_fields, exclude_fallbacks=True）", expanded=False):
+    with st.expander("查看 真值发现算法 输入预览（from_model_fields, exclude_fallbacks=True）", expanded=False):
         render_light_table(_fact_table_rows(tf_input_table), ["模型", "维度", "facts"])
 
     with st.expander("查看归一化 warnings 与安全补丁", expanded=False):
@@ -938,7 +968,7 @@ def render_normalization() -> None:
 
 
 # ══════════════════════════════════════════════════════════════════
-#  Step 7 — TruthFinder
+#  Step 7 — 真值发现算法
 # ══════════════════════════════════════════════════════════════════
 
 def render_truthfinder() -> None:
@@ -952,7 +982,7 @@ def render_truthfinder() -> None:
     # Determine which models actually participated
     active_models = [m for m in MODELS if m in normalized_all]
 
-    if st.button("🔍 运行 TruthFinder 可信聚合", use_container_width=True, key="btn_run_tf", type="primary"):
+    if st.button("🔍 运行 真值发现算法可信聚合", use_container_width=True, key="btn_run_tf", type="primary"):
         try:
             t_score, s_score, cand_map, debug_info = labor_truthfinder_run(
                 models=active_models,
@@ -978,9 +1008,9 @@ def render_truthfinder() -> None:
             }
             st.session_state["labor_error"] = ""
         except Exception as ex:
-            st.session_state["labor_error"] = f"TruthFinder 运行失败：{type(ex).__name__}: {ex}"
+            st.session_state["labor_error"] = f"真值发现算法 运行失败：{type(ex).__name__}: {ex}"
 
-    if st.session_state.get("labor_error") and "TruthFinder 运行失败" in st.session_state["labor_error"]:
+    if st.session_state.get("labor_error") and "真值发现算法 运行失败" in st.session_state["labor_error"]:
         st.error(st.session_state["labor_error"])
 
     tf_payload = st.session_state.get("labor_truthfinder_payload")
@@ -1014,7 +1044,7 @@ def render_truthfinder() -> None:
     render_light_table(summary_rows, ["维度", "聚合可信结果", "置信度", "候选数"])
 
     # Debug
-    with st.expander("查看 TruthFinder debug 信息", expanded=False):
+    with st.expander("查看 真值发现算法 debug 信息", expanded=False):
         _render_json_block(debug_info)
 
 
@@ -1092,7 +1122,7 @@ def build_final_labor_report() -> str:
             lines.append(f"  - {model_ui_name(m)}：可信度 {float(s):.4f}")
     elif n_models == 1:
         m = list(t_score.keys())[0]
-        lines.append(f"**注意**：当前仅使用 1 个模型（{model_ui_name(m)}），无法发挥 TruthFinder 多源交叉验证优势。建议至少使用 2 个不同模型族的模型。")
+        lines.append(f"**注意**：当前仅使用 1 个模型（{model_ui_name(m)}），无法发挥 真值发现算法 多源交叉验证优势。建议至少使用 2 个不同模型族的模型。")
 
     lines.append("")
 
@@ -1112,14 +1142,14 @@ def build_final_labor_report() -> str:
 
     lines.append("")
     lines.append("---")
-    lines.append("**免责声明**：本报告由多模型 TruthFinder 可信聚合系统自动生成，不构成正式法律意见。法律判断请以执业律师结合全部案件材料后的专业意见为准。引用法条请以国家法律法规数据库公布的最新有效文本为准。")
+    lines.append("**免责声明**：本报告由多模型 真值发现算法可信聚合系统自动生成，不构成正式法律意见。法律判断请以执业律师结合全部案件材料后的专业意见为准。引用法条请以国家法律法规数据库公布的最新有效文本为准。")
 
     return "\n".join(lines)
 
 
 def render_final_report() -> None:
     if not st.session_state.get("labor_truthfinder_payload"):
-        st.info("请先完成 TruthFinder 聚合。")
+        st.info("请先完成 真值发现算法 聚合。")
         return
 
     # Try BERT comprehensive report first
@@ -1173,7 +1203,7 @@ def render_zk() -> None:
 
     truthfinder = st.session_state.get("labor_truthfinder_payload")
     if not truthfinder:
-        st.info("🔒 请先完成 TruthFinder 聚合，才能进行零知识证明验证。")
+        st.info("🔒 请先完成 真值发现算法 聚合，才能进行零知识证明验证。")
         return
 
     trust_rank = truthfinder.get("truth_rows", []) or []
@@ -1336,7 +1366,7 @@ def main() -> None:
     render_step1_input()
 
     if st.session_state.get("labor_error") and "归一化失败" not in str(st.session_state["labor_error"]) \
-            and "TruthFinder" not in str(st.session_state["labor_error"]):
+            and "真值发现算法" not in str(st.session_state["labor_error"]):
         st.error(st.session_state["labor_error"])
 
     results = st.session_state.get("labor_results")
@@ -1365,13 +1395,13 @@ def main() -> None:
             # BERT matching visualization
             if _BERT_AVAILABLE:
                 st.divider()
-                render_step_header("5a", "BERT 语义匹配过程", "展示 BERT 如何将每个模型的自然语言输出映射到标准闭集选项")
+                render_step_header("5a", "BERT 语义对齐过程", "展示 BERT 如何将每个模型的自然语言输出映射到标准闭集选项")
                 with st.expander("🔍 展开查看 BERT 匹配详情", expanded=False):
                     render_bert_matching_visualization(results)
 
             # Step 6: Normalization
             st.divider()
-            render_step_header(6, "归一化", "normalized 用于前端展示；TruthFinder 默认输入来自 from_model_fields + exclude_fallbacks=True")
+            render_step_header(6, "归一化", "normalized 用于前端展示；真值发现算法 默认输入来自 from_model_fields + exclude_fallbacks=True")
             render_normalization()
 
         elif results is not None and not results:
@@ -1427,7 +1457,7 @@ def main() -> None:
                 except Exception as e:
                     st.error(f"规则基线分析失败: {e}")
 
-    # Grounding Guard display (between normalization and TruthFinder)
+    # 事实依据校验 display (between normalization and 真值发现算法)
     normalized_all = st.session_state.get("labor_normalized_all") or {}
     all_warnings: list[dict] = []
     for model_name, norm_result in normalized_all.items():
@@ -1436,8 +1466,8 @@ def main() -> None:
 
     if all_warnings:
         st.divider()
-        render_step_header("6a", "事实依据校验 / Grounding Guard",
-                          f"检测到 {len(all_warnings)} 条无原文依据的敏感事实，已从 TruthFinder 输入中移除")
+        render_step_header("6a", "事实依据校验 / 事实依据校验",
+                          f"检测到 {len(all_warnings)} 条无原文依据的敏感事实，已从 真值发现算法 输入中移除")
         gw_rows = []
         for w in all_warnings:
             gw_rows.append({
@@ -1450,29 +1480,29 @@ def main() -> None:
         render_light_table(gw_rows, ["来源", "维度", "被过滤事实", "原因", "操作"])
     elif normalized_all:
         st.divider()
-        render_step_header("6a", "事实依据校验 / Grounding Guard",
+        render_step_header("6a", "事实依据校验 / 事实依据校验",
                           "未检测到明显无原文依据的敏感事实")
-        st.success("✅ Grounding Guard 检查通过：归一化结果中未发现无原文依据的敏感事实。")
+        st.success("✅ 事实依据校验 检查通过：归一化结果中未发现无原文依据的敏感事实。")
 
-    normalized_mode = "BERT 增强归一化 + Grounding Guard" if _BERT_AVAILABLE else "规则归一化 + Grounding Guard"
+    normalized_mode = "BERT 增强归一化 + 事实依据校验" if _BERT_AVAILABLE else "规则归一化 + 事实依据校验"
     st.caption(f"当前归一化模式：{normalized_mode}")
 
-    # Step 7: TruthFinder
+    # Step 7: 真值发现算法
     if st.session_state.get("labor_normalized_all"):
         st.divider()
-        render_step_header(7, "TruthFinder 可信聚合", "多模型交叉验证，迭代置信度传播")
+        render_step_header(7, "真值发现算法可信聚合", "多模型交叉验证，迭代置信度传播")
         render_truthfinder()
 
     # Step 8: Final report
     if st.session_state.get("labor_truthfinder_payload"):
         st.divider()
-        render_step_header(8, "律师综合报告", "基于 TruthFinder 聚合结果 + BERT 分歧度/置信度分析，模板生成，不额外调用 LLM")
+        render_step_header(8, "律师综合报告", "基于 真值发现算法 聚合结果 + BERT 分歧度/置信度分析，模板生成，不额外调用 LLM")
         render_final_report()
 
     # Step 9: ZK
     if st.session_state.get("labor_truthfinder_payload"):
         st.divider()
-        render_step_header(9, "零知识证明验证", "Groth16 电路参考 — 验证 TruthFinder 计算完整性")
+        render_step_header(9, "零知识证明验证", "Groth16 电路参考 — 验证 真值发现算法 计算完整性")
         render_zk()
 
     # Footer

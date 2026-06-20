@@ -100,8 +100,8 @@ def build_labor_prompt_v2(case_text: str, profile_hint: str = "") -> str:
 请只输出合法 JSON，不要输出 Markdown，不要输出代码块，不要输出解释性前缀。
 
 请根据用户提供的劳动争议案件描述，输出：
-1. user_explanation：给咨询者看的自然语言法律初步分析；
-2. structured_analysis：七个维度下的结构化判断。
+1. analysis_text：一段完整自然语言案件分析（按模板：法律关系判断→核心争议点→关键事实梳理→法条适用分析→裁判倾向预判）；
+2. structured_analysis：七个维度下的结构化判断（从候选集合选择）。
 
 严格要求：
 1. 不能出具正式法律意见书。
@@ -126,7 +126,7 @@ def build_labor_prompt_v2(case_text: str, profile_hint: str = "") -> str:
 
 输出 JSON 格式必须严格如下：
 {{{{
-  "user_explanation": "给咨询者看的自然语言法律初步分析",
+  "analysis_text": "## 案件分析\n\n### 法律关系判断\n...\n\n### 核心争议点\n...\n\n### 关键事实梳理\n...\n\n### 法条适用分析\n...\n\n### 裁判倾向预判\n...",
   "structured_analysis": {{{{
     "relationship_type": "只能从候选集合中选择一个",
     "dispute_focus": ["只能从候选集合中选择，可以多个"],

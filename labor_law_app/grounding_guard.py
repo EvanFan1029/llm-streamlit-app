@@ -103,12 +103,8 @@ def filter_unsupported_facts(
                 if has_trigger:
                     continue
 
-                forbidden_indicators = rule.get("forbidden_indicators", [])
-                if forbidden_indicators and not _has_only_forbidden(
-                    case_text, rule["required_triggers"], forbidden_indicators
-                ):
-                    continue
-
+                # 修改后逻辑：无触发词一律删除
+                # 无论原文是否存在禁用语，只要没有明确的触发依据，敏感事实都被拦截
                 warnings.append({
                     "source": source_name or "unknown",
                     "object_id": object_id,
